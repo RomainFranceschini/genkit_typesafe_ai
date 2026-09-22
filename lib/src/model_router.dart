@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:genkit/plugin.dart';
@@ -8,6 +9,7 @@ import 'classifier.dart';
 
 const modelRouteQuestionName = 'modelRoute';
 const _routeDecisionsContextKey = 'genkit_typesafe_ai/model-router-decisions';
+final _activeModelRouterZoneKey = Object();
 
 final class TypeSafeModelRoute {
   const TypeSafeModelRoute({required this.model, required this.criteria});
@@ -122,6 +124,9 @@ final class TypeSafeModelRouter implements GenerateMiddlewareRef<Object?> {
   @internal
   final TypeSafeClassifier classifier;
 
+  @internal
+  final Object decisionZoneKey = Object();
+
   TypeSafeRouteDecision? decisionFromContext(Map<String, dynamic>? context) {
     final decisions = context?[_routeDecisionsContextKey];
     if (decisions is! Map) return null;
@@ -152,6 +157,29 @@ final class _TypeSafeModelRouterMiddleware extends GenerateMiddleware {
     )
     next,
   ) async {
+    final active = Zone.current[_activeModelRouterZoneKey];
+    if (active is TypeSafeModelRouter && !identical(active, router)) {
+      throw GenkitException(
+        'Only one TypeSafe model router may be used in a generation run.',
+        status: StatusCodes.FAILED_PRECONDITION,
+      );
+    }
+
+    final existing = Zone.current[router.decisionZoneKey];
+    if (existing is TypeSafeRouteDecision) {
+      final route = router.resolvedRoutes[existing.route];
+      if (route == null) {
+        throw GenkitException(
+          'TypeSafe model router "${router.localName}" retained an unknown route.',
+          status: StatusCodes.INTERNAL,
+        );
+      }
+      return next(
+        _routeEnvelope(envelope, route),
+        _withRouteDecision(ctx, router, existing),
+      );
+    }
+
     final latestUser = _latestUserMessage(envelope.request.messages);
     if (latestUser == null) {
       throw GenkitException(
@@ -175,9 +203,15 @@ final class _TypeSafeModelRouterMiddleware extends GenerateMiddleware {
       modelName: route.modelName,
       answer: answer,
     );
-    return next(
-      _routeEnvelope(envelope, route),
-      _withRouteDecision(ctx, router, decision),
+    return runZoned(
+      () => next(
+        _routeEnvelope(envelope, route),
+        _withRouteDecision(ctx, router, decision),
+      ),
+      zoneValues: {
+        _activeModelRouterZoneKey: router,
+        router.decisionZoneKey: decision,
+      },
     );
   }
 }
