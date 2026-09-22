@@ -56,6 +56,7 @@ final class TypeSafeClassifier {
     required this.name,
     required Map<String, Question<Answer>> questions,
     required TypeSafeClassifyFn classify,
+    Map<String, Object?> typesafeMetadata = const {},
     this.model,
     this.timeout,
     this.retry,
@@ -70,6 +71,7 @@ final class TypeSafeClassifier {
       outputSchema: _resultSchema,
       metadata: {
         'typesafe': {
+          ...typesafeMetadata,
           'model': model,
           'questions': serializeQuestions(this.questions),
         },

@@ -1,6 +1,4 @@
-import 'package:genkit/genkit.dart';
-// ignore: implementation_imports
-import 'package:genkit/src/core/plugin.dart';
+import 'package:genkit/plugin.dart';
 import 'package:http/http.dart' as http;
 import 'package:logging/logging.dart';
 import 'package:meta/meta.dart';
@@ -8,6 +6,7 @@ import 'package:typesafe_ai_sdk/typesafe_ai_sdk.dart';
 
 import 'classifier.dart';
 import 'errors.dart';
+import 'model_router.dart';
 
 const defaultTypeSafeNamespace = 'typesafe';
 const typeSafeAI = TypeSafePluginHandle();
@@ -106,6 +105,7 @@ final class TypeSafePlugin extends GenkitPlugin {
 
   TypeSafeClient? _client;
   final _classifiers = <String, TypeSafeClassifier>{};
+  final _modelRouters = <String, TypeSafeModelRouter>{};
   var _initialized = false;
   var _closed = false;
 
@@ -117,56 +117,170 @@ final class TypeSafePlugin extends GenkitPlugin {
     RetryPolicy? retry,
     Map<String, String>? headers,
   }) {
-    _ensureOpen();
-    if (_initialized) {
-      throw GenkitException(
-        'TypeSafe classifiers must be defined before plugin initialization.',
-        status: StatusCodes.FAILED_PRECONDITION,
-      );
-    }
-    if (name.trim().isEmpty || name.contains('/')) {
-      throw GenkitException(
-        'Classifier name must be non-empty and must not contain "/".',
-        status: StatusCodes.INVALID_ARGUMENT,
-      );
-    }
+    _ensureDefinitionsOpen();
+    _validateDefinitionName(name);
     if (questions.isEmpty) {
       throw GenkitException(
         'Classifier "$name" requires at least one question.',
         status: StatusCodes.INVALID_ARGUMENT,
       );
     }
-    if (_classifiers.containsKey(name)) {
-      throw GenkitException(
-        'Classifier "$name" is already defined.',
-        status: StatusCodes.ALREADY_EXISTS,
-      );
-    }
-    return _classifiers[name] = TypeSafeClassifier.internal(
-      namespace: this.name,
+    _ensureNameAvailable(name);
+    final classifier = _buildClassifier(
       name: name,
       questions: questions,
       model: model,
       timeout: timeout,
       retry: retry,
       headers: headers,
-      classify:
-          ({
-            required state,
-            required questions,
-            model,
-            timeout,
-            retry,
-            headers,
-          }) => _getClient().systemOne(
-            state: state,
-            questions: questions,
-            model: model,
-            timeout: timeout,
-            retry: retry,
-            headers: headers,
-          ),
     );
+    _classifiers[name] = classifier;
+    return classifier;
+  }
+
+  TypeSafeModelRouter defineModelRouter({
+    required String name,
+    required Object instructions,
+    required Map<String, TypeSafeModelRoute> routes,
+    String? classifierModel,
+    Duration? timeout,
+    RetryPolicy? retry,
+    Map<String, String>? headers,
+  }) {
+    _ensureDefinitionsOpen();
+    _validateDefinitionName(name);
+    _ensureNameAvailable(name);
+    if (routes.isEmpty) {
+      throw GenkitException(
+        'Model router "$name" requires at least one route.',
+        status: StatusCodes.INVALID_ARGUMENT,
+      );
+    }
+
+    final normalizedInstructions = snapshotJson(
+      instructions,
+      field: 'Model router "$name" instructions',
+    );
+    if (normalizedInstructions == null) {
+      throw GenkitException(
+        'Model router "$name" instructions must not encode to null.',
+        status: StatusCodes.INVALID_ARGUMENT,
+      );
+    }
+
+    final normalizedDefinitions = <String, TypeSafeModelRoute>{};
+    final resolved = <String, ResolvedTypeSafeModelRoute>{};
+    for (final entry in routes.entries) {
+      final label = entry.key;
+      final route = entry.value;
+      if (label.trim().isEmpty) {
+        throw GenkitException(
+          'Model router "$name" route labels must not be blank.',
+          status: StatusCodes.INVALID_ARGUMENT,
+        );
+      }
+      final modelName = route.model.name;
+      if (modelName.trim().isEmpty) {
+        throw GenkitException(
+          'Model router "$name" route "$label" requires a model name.',
+          status: StatusCodes.INVALID_ARGUMENT,
+        );
+      }
+      final criteria = snapshotJson(
+        route.criteria,
+        field: 'Model router "$name" route "$label" criteria',
+      );
+      final config = snapshotModelConfig(
+        route.model.config,
+        field: 'Model router "$name" route "$label" model config',
+      );
+      final definition = TypeSafeModelRoute(
+        model: modelRef<dynamic>(modelName, config: config),
+        criteria: criteria,
+      );
+      normalizedDefinitions[label] = definition;
+      resolved[label] = ResolvedTypeSafeModelRoute(
+        definition: definition,
+        modelName: modelName,
+        config: config,
+      );
+    }
+
+    final question = Choice<String>({
+      for (final entry in normalizedDefinitions.entries)
+        entry.key: entry.value.criteria,
+    }, instructions: normalizedInstructions);
+    final classifier = _buildClassifier(
+      name: name,
+      questions: {modelRouteQuestionName: question},
+      model: classifierModel,
+      timeout: timeout,
+      retry: retry,
+      headers: headers,
+      typesafeMetadata: {
+        'kind': 'model-router',
+        'router': '${this.name}/$name',
+        'routes': {
+          for (final entry in resolved.entries)
+            entry.key: {'model': entry.value.modelName},
+        },
+      },
+    );
+    final router = TypeSafeModelRouter.internal(
+      localName: name,
+      name: '${this.name}/$name',
+      routes: Map.unmodifiable(normalizedDefinitions),
+      resolvedRoutes: Map.unmodifiable(resolved),
+      question: question,
+      classifier: classifier,
+    );
+
+    _classifiers[name] = classifier;
+    _modelRouters[name] = router;
+    return router;
+  }
+
+  TypeSafeClassifier _buildClassifier({
+    required String name,
+    required Map<String, Question<Answer>> questions,
+    String? model,
+    Duration? timeout,
+    RetryPolicy? retry,
+    Map<String, String>? headers,
+    Map<String, Object?> typesafeMetadata = const {},
+  }) => TypeSafeClassifier.internal(
+    namespace: this.name,
+    name: name,
+    questions: questions,
+    model: model,
+    timeout: timeout,
+    retry: retry,
+    headers: headers,
+    typesafeMetadata: typesafeMetadata,
+    classify:
+        ({
+          required state,
+          required questions,
+          model,
+          timeout,
+          retry,
+          headers,
+        }) => _getClient().systemOne(
+          state: state,
+          questions: questions,
+          model: model,
+          timeout: timeout,
+          retry: retry,
+          headers: headers,
+        ),
+  );
+
+  @override
+  List<GenerateMiddlewareDef> middleware() {
+    _freezeDefinitions();
+    return [
+      for (final router in _modelRouters.values) router.middlewareDefinition,
+    ];
   }
 
   Future<List<ModelCard>> listModels() async {
@@ -232,6 +346,34 @@ final class TypeSafePlugin extends GenkitPlugin {
       throw GenkitException(
         'TypeSafe plugin "$name" is closed.',
         status: StatusCodes.FAILED_PRECONDITION,
+      );
+    }
+  }
+
+  void _ensureDefinitionsOpen() {
+    _ensureOpen();
+    if (_initialized) {
+      throw GenkitException(
+        'TypeSafe definitions must be added before plugin initialization.',
+        status: StatusCodes.FAILED_PRECONDITION,
+      );
+    }
+  }
+
+  void _validateDefinitionName(String name) {
+    if (name.trim().isEmpty || name.contains('/')) {
+      throw GenkitException(
+        'Definition name must be non-empty and must not contain "/".',
+        status: StatusCodes.INVALID_ARGUMENT,
+      );
+    }
+  }
+
+  void _ensureNameAvailable(String name) {
+    if (_classifiers.containsKey(name) || _modelRouters.containsKey(name)) {
+      throw GenkitException(
+        'TypeSafe definition "$name" is already defined.',
+        status: StatusCodes.ALREADY_EXISTS,
       );
     }
   }
