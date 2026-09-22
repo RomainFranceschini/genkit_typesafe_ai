@@ -470,6 +470,137 @@ void main() {
   });
 
   test(
+    'repeated router survives an intervening wrapped chunk callback',
+    () async {
+      var typeSafeCalls = 0;
+      var modelCalls = 0;
+      final plugin = TypeSafePlugin(
+        apiKey: 'test-key',
+        httpClient: MockClient((request) async {
+          typeSafeCalls++;
+          return modelRouteResponse('fast');
+        }),
+      );
+      final router = plugin.defineModelRouter(
+        name: 'cost-router',
+        instructions: 'Choose.',
+        routes: {
+          'fast': TypeSafeModelRoute(
+            model: modelRef('fast-model'),
+            criteria: 'Simple.',
+          ),
+        },
+      );
+      final middlewarePlugin = _TestMiddlewarePlugin([
+        genkit_plugin.defineMiddleware<Object?>(
+          name: 'test/wrap-chunks',
+          create: (config, context) => _CallbackMiddleware(
+            (envelope, ctx, next) => next(envelope, _withWrappedSendChunk(ctx)),
+          ),
+        ),
+      ]);
+      final ai = Genkit(plugins: [plugin, middlewarePlugin], isDevEnv: false);
+      ai.defineModel(
+        name: 'fast-model',
+        fn: (request, ctx) async {
+          modelCalls++;
+          return _textResponse('fast');
+        },
+      );
+
+      try {
+        final response = await ai.generate(
+          prompt: 'simple',
+          use: [
+            router,
+            middlewareRef(name: 'test/wrap-chunks'),
+            router,
+          ],
+        );
+
+        expect(response.finishReason, FinishReason.stop);
+        expect(typeSafeCalls, 1);
+        expect(modelCalls, 1);
+      } finally {
+        plugin.close();
+        await ai.shutdown();
+      }
+    },
+  );
+
+  test(
+    'repeated router survives an intervening wrapped input stream',
+    () async {
+      var typeSafeCalls = 0;
+      var modelCalls = 0;
+      final plugin = TypeSafePlugin(
+        apiKey: 'test-key',
+        httpClient: MockClient((request) async {
+          typeSafeCalls++;
+          return modelRouteResponse('fast');
+        }),
+      );
+      final router = plugin.defineModelRouter(
+        name: 'cost-router',
+        instructions: 'Choose.',
+        routes: {
+          'fast': TypeSafeModelRoute(
+            model: modelRef('fast-model'),
+            criteria: 'Simple.',
+          ),
+        },
+      );
+      final middlewarePlugin = _TestMiddlewarePlugin([
+        genkit_plugin.defineMiddleware<Object?>(
+          name: 'test/wrap-input',
+          create: (config, context) => _CallbackMiddleware(
+            (envelope, ctx, next) =>
+                next(envelope, _withWrappedInputStream(ctx)),
+          ),
+        ),
+      ]);
+      final ai = Genkit(plugins: [plugin, middlewarePlugin], isDevEnv: false);
+      ai.defineModel(
+        name: 'fast-model',
+        fn: (request, ctx) async {
+          modelCalls++;
+          return _textResponse('fast');
+        },
+      );
+
+      try {
+        final generateAction = await ai.registry.lookupAction(
+          ActionType.util,
+          'generate',
+        );
+        await generateAction!.runRaw(
+          GenerateActionOptions(
+            model: 'fast-model',
+            messages: [
+              Message(
+                role: Role.user,
+                content: [TextPart(text: 'simple')],
+              ),
+            ],
+            use: [
+              MiddlewareRef(name: router.name),
+              MiddlewareRef(name: 'test/wrap-input'),
+              MiddlewareRef(name: router.name),
+            ],
+          ).toJson(),
+          inputStream: const Stream<GenerateActionOptions>.empty(),
+        );
+
+        expect(typeSafeCalls, 1);
+        expect(modelCalls, 1);
+      } finally {
+        plugin.close();
+        await ai.shutdown();
+      }
+    },
+  );
+
+  test(
     'rejects distinct routers before the second classification or model',
     () async {
       var typeSafeCalls = 0;
@@ -526,6 +657,75 @@ void main() {
       }
     },
   );
+
+  test('rejects distinct routers across a wrapped chunk callback', () async {
+    var typeSafeCalls = 0;
+    var modelCalls = 0;
+    final plugin = TypeSafePlugin(
+      apiKey: 'test-key',
+      httpClient: MockClient((request) async {
+        typeSafeCalls++;
+        return modelRouteResponse('fast');
+      }),
+    );
+    final firstRouter = plugin.defineModelRouter(
+      name: 'first-router',
+      instructions: 'Choose.',
+      routes: {
+        'fast': TypeSafeModelRoute(
+          model: modelRef('first-model'),
+          criteria: 'Simple.',
+        ),
+      },
+    );
+    final secondRouter = plugin.defineModelRouter(
+      name: 'second-router',
+      instructions: 'Choose.',
+      routes: {
+        'fast': TypeSafeModelRoute(
+          model: modelRef('second-model'),
+          criteria: 'Simple.',
+        ),
+      },
+    );
+    final middlewarePlugin = _TestMiddlewarePlugin([
+      genkit_plugin.defineMiddleware<Object?>(
+        name: 'test/wrap-chunks',
+        create: (config, context) => _CallbackMiddleware(
+          (envelope, ctx, next) => next(envelope, _withWrappedSendChunk(ctx)),
+        ),
+      ),
+    ]);
+    final ai = Genkit(plugins: [plugin, middlewarePlugin], isDevEnv: false);
+    for (final name in ['first-model', 'second-model']) {
+      ai.defineModel(
+        name: name,
+        fn: (request, ctx) async {
+          modelCalls++;
+          return _textResponse(name);
+        },
+      );
+    }
+
+    try {
+      final response = await ai.generate(
+        prompt: 'simple',
+        use: [
+          firstRouter,
+          middlewareRef(name: 'test/wrap-chunks'),
+          secondRouter,
+        ],
+      );
+
+      expect(response.finishReason, FinishReason.failed);
+      expect(response.error?.status, StatusCodes.FAILED_PRECONDITION.name);
+      expect(typeSafeCalls, 1);
+      expect(modelCalls, 0);
+    } finally {
+      plugin.close();
+      await ai.shutdown();
+    }
+  });
 
   test(
     'nested generation with the same router gets an independent decision',
@@ -737,6 +937,102 @@ void main() {
     }
   });
 
+  test(
+    'independent raw generation may forward callback and input stream',
+    () async {
+      var typeSafeCalls = 0;
+      var fastModelCalls = 0;
+      var powerfulModelCalls = 0;
+      final plugin = TypeSafePlugin(
+        apiKey: 'test-key',
+        httpClient: MockClient((request) async {
+          typeSafeCalls++;
+          final text = _typeSafeStateText(request);
+          return modelRouteResponse(
+            text.contains('nested') ? 'powerful' : 'fast',
+          );
+        }),
+      );
+      final router = plugin.defineModelRouter(
+        name: 'cost-router',
+        instructions: 'Choose.',
+        routes: {
+          'fast': TypeSafeModelRoute(
+            model: modelRef('fast-model'),
+            criteria: 'Simple.',
+          ),
+          'powerful': TypeSafeModelRoute(
+            model: modelRef('powerful-model'),
+            criteria: 'Complex.',
+          ),
+        },
+      );
+      final middlewarePlugin = _TestMiddlewarePlugin([
+        genkit_plugin.defineMiddleware<Object?>(
+          name: 'test/nested-raw-generate',
+          create: (config, context) => _NestedRawGenerateMiddleware(
+            ai: context.ai,
+            routerName: router.name,
+          ),
+        ),
+      ]);
+      final ai = Genkit(plugins: [plugin, middlewarePlugin], isDevEnv: false);
+      ai.defineModel(
+        name: 'fast-model',
+        fn: (request, ctx) async {
+          fastModelCalls++;
+          return _textResponse('nested-wrong-fast');
+        },
+      );
+      ai.defineModel(
+        name: 'powerful-model',
+        fn: (request, ctx) async {
+          powerfulModelCalls++;
+          return _textResponse('nested-powerful');
+        },
+      );
+
+      try {
+        final generateAction =
+            await ai.registry.lookupAction(ActionType.util, 'generate')
+                as Action<
+                  GenerateActionOptions,
+                  ModelResponse,
+                  ModelResponseChunk,
+                  void
+                >;
+        final sharedInput = const Stream<GenerateActionOptions>.empty();
+        void sharedChunk(ModelResponseChunk chunk) {}
+        final result = await generateAction.runRaw(
+          GenerateActionOptions(
+            model: 'fast-model',
+            messages: [
+              Message(
+                role: Role.user,
+                content: [TextPart(text: 'outer fast')],
+              ),
+            ],
+            use: [
+              MiddlewareRef(name: router.name),
+              MiddlewareRef(name: 'test/nested-raw-generate'),
+            ],
+          ).toJson(),
+          onChunk: sharedChunk,
+          inputStream: sharedInput,
+        );
+        final response = result.result;
+
+        expect(response.text, 'nested-powerful');
+        expect(typeSafeCalls, 2);
+        expect(fastModelCalls, 0);
+        expect(powerfulModelCalls, 1);
+      } finally {
+        plugin.close();
+        await ai.shutdown();
+      }
+    },
+  );
+
   test('isolates route decisions across concurrent generation runs', () async {
     var typeSafeCalls = 0;
     var fastModelCalls = 0;
@@ -804,6 +1100,85 @@ void main() {
       expect(modelDecisions['fast']?.route, 'fast');
       expect(modelDecisions['powerful']?.route, 'powerful');
     } finally {
+      plugin.close();
+      await ai.shutdown();
+    }
+  });
+
+  test('isolates runs delayed by preceding asynchronous middleware', () async {
+    var typeSafeCalls = 0;
+    final firstEnteredMiddleware = Completer<void>();
+    final releaseFirst = Completer<void>();
+    final plugin = TypeSafePlugin(
+      apiKey: 'test-key',
+      httpClient: MockClient((request) async {
+        typeSafeCalls++;
+        final text = _typeSafeStateText(request);
+        return modelRouteResponse(
+          text.contains('powerful') ? 'powerful' : 'fast',
+        );
+      }),
+    );
+    final router = plugin.defineModelRouter(
+      name: 'cost-router',
+      instructions: 'Choose.',
+      routes: {
+        'fast': TypeSafeModelRoute(
+          model: modelRef('fast-model'),
+          criteria: 'Simple.',
+        ),
+        'powerful': TypeSafeModelRoute(
+          model: modelRef('powerful-model'),
+          criteria: 'Complex.',
+        ),
+      },
+    );
+    final middlewarePlugin = _TestMiddlewarePlugin([
+      genkit_plugin.defineMiddleware<Object?>(
+        name: 'test/delay-first',
+        create: (config, context) =>
+            _CallbackMiddleware((envelope, ctx, next) async {
+              if (_latestGenerateText(envelope.request).contains('first')) {
+                firstEnteredMiddleware.complete();
+                await releaseFirst.future;
+              }
+              return next(envelope, ctx);
+            }),
+      ),
+    ]);
+    final ai = Genkit(plugins: [plugin, middlewarePlugin], isDevEnv: false);
+    ai.defineModel(
+      name: 'fast-model',
+      fn: (request, ctx) async => _textResponse('fast'),
+    );
+    ai.defineModel(
+      name: 'powerful-model',
+      fn: (request, ctx) async => _textResponse('powerful'),
+    );
+
+    try {
+      final first = ai.generate(
+        prompt: 'first fast',
+        use: [
+          middlewareRef(name: 'test/delay-first'),
+          router,
+        ],
+      );
+      await firstEnteredMiddleware.future;
+      final second = await ai.generate(
+        prompt: 'second powerful',
+        use: [
+          middlewareRef(name: 'test/delay-first'),
+          router,
+        ],
+      );
+      releaseFirst.complete();
+
+      expect((await first).text, 'fast');
+      expect(second.text, 'powerful');
+      expect(typeSafeCalls, 2);
+    } finally {
+      if (!releaseFirst.isCompleted) releaseFirst.complete();
       plugin.close();
       await ai.shutdown();
     }
@@ -1105,6 +1480,68 @@ final class _CallbackMiddleware extends GenerateMiddleware {
   ) => callback(envelope, ctx, next);
 }
 
+final class _NestedRawGenerateMiddleware extends GenerateMiddleware {
+  _NestedRawGenerateMiddleware({required this.ai, required this.routerName});
+
+  final GenkitAI ai;
+  final String routerName;
+
+  @override
+  Future<GenerateResponseHelper> generate(
+    genkit_plugin.GenerateTurnState envelope,
+    ActionFnArg<ModelResponseChunk, GenerateActionOptions, void> ctx,
+    Future<GenerateResponseHelper> Function(
+      genkit_plugin.GenerateTurnState envelope,
+      ActionFnArg<ModelResponseChunk, GenerateActionOptions, void> ctx,
+    )
+    next,
+  ) async {
+    final generateAction = await ai.registry.lookupAction(
+      ActionType.util,
+      'generate',
+    ) as Action<GenerateActionOptions, ModelResponse, ModelResponseChunk, void>;
+    final result = await generateAction.runRaw(
+      GenerateActionOptions(
+        model: envelope.request.model,
+        messages: [
+          Message(
+            role: Role.user,
+            content: [TextPart(text: 'nested powerful')],
+          ),
+        ],
+        use: [MiddlewareRef(name: routerName)],
+      ).toJson(),
+      onChunk: ctx.sendChunk,
+      context: ctx.context,
+      inputStream: ctx.inputStream,
+      cancel: ctx.cancel,
+    );
+    return GenerateResponseHelper(result.result);
+  }
+}
+
+ActionFnArg<Chunk, Input, Init> _withWrappedSendChunk<Chunk, Input, Init>(
+  ActionFnArg<Chunk, Input, Init> context,
+) => (
+  streamingRequested: context.streamingRequested,
+  sendChunk: (chunk) => context.sendChunk(chunk),
+  context: context.context,
+  inputStream: context.inputStream,
+  init: context.init,
+  cancel: context.cancel,
+);
+
+ActionFnArg<Chunk, Input, Init> _withWrappedInputStream<Chunk, Input, Init>(
+  ActionFnArg<Chunk, Input, Init> context,
+) => (
+  streamingRequested: context.streamingRequested,
+  sendChunk: context.sendChunk,
+  context: context.context,
+  inputStream: context.inputStream?.map((input) => input),
+  init: context.init,
+  cancel: context.cancel,
+);
+
 final class _TestMiddlewarePlugin extends genkit_plugin.GenkitPlugin {
   _TestMiddlewarePlugin(this.definitions);
 
@@ -1133,6 +1570,15 @@ String _typeSafeStateText(http.Request request) {
 }
 
 String _latestRequestText(ModelRequest request) => request.messages.last.content
+    .where((part) => part.isText)
+    .map((part) => part.text)
+    .whereType<String>()
+    .join();
+
+String _latestGenerateText(GenerateActionOptions request) => request
+    .messages
+    .last
+    .content
     .where((part) => part.isText)
     .map((part) => part.text)
     .whereType<String>()

@@ -10,6 +10,7 @@ import 'classifier.dart';
 const modelRouteQuestionName = 'modelRoute';
 const _routeDecisionsContextKey = 'genkit_typesafe_ai/model-router-decisions';
 final _modelRouterRunStateZoneKey = Object();
+var _latestModelRouterMiddlewareCreationId = 0;
 
 final class TypeSafeModelRoute {
   const TypeSafeModelRoute({required this.model, required this.criteria});
@@ -135,14 +136,18 @@ final class TypeSafeModelRouter implements GenerateMiddlewareRef<Object?> {
   GenerateMiddlewareDef<Object?> get middlewareDefinition =>
       defineMiddleware<Object?>(
         name: name,
-        create: (config, context) => _TypeSafeModelRouterMiddleware(this),
+        create: (config, context) => _TypeSafeModelRouterMiddleware(
+          this,
+          ++_latestModelRouterMiddlewareCreationId,
+        ),
       );
 }
 
 final class _TypeSafeModelRouterMiddleware extends GenerateMiddleware {
-  _TypeSafeModelRouterMiddleware(this.router);
+  _TypeSafeModelRouterMiddleware(this.router, this.creationId);
 
   final TypeSafeModelRouter router;
+  final int creationId;
 
   @override
   Future<GenerateResponseHelper> generate(
@@ -154,13 +159,15 @@ final class _TypeSafeModelRouterMiddleware extends GenerateMiddleware {
     )
     next,
   ) async {
+    final latestCreationIdAtEntry = _latestModelRouterMiddlewareCreationId;
     final inheritedState = Zone.current[_modelRouterRunStateZoneKey];
-    // Zones also flow into nested and delayed generation calls. Recursive
-    // Genkit turns are identified by their positive turn number; turn zero
-    // reuses state only while traversing the same public action context.
+    // Genkit 0.17 resolves every middleware ref synchronously, in list order,
+    // before invoking the first hook. It then reuses those instances for tool
+    // turns. A nested or delayed independent generation resolves newer
+    // instances, even though it inherits this Zone and may copy ActionFnArg.
     final activeState =
         inheritedState is _TypeSafeModelRouterRunState &&
-            (envelope.currentTurn > 0 || inheritedState.matches(ctx))
+            creationId <= inheritedState.latestCreationId
         ? inheritedState
         : null;
     if (activeState != null && !identical(activeState.router, router)) {
@@ -217,8 +224,7 @@ final class _TypeSafeModelRouterMiddleware extends GenerateMiddleware {
         _modelRouterRunStateZoneKey: _TypeSafeModelRouterRunState(
           router: router,
           decision: decision,
-          sendChunk: ctx.sendChunk,
-          inputStream: ctx.inputStream,
+          latestCreationId: latestCreationIdAtEntry,
         ),
       },
     );
@@ -229,18 +235,12 @@ final class _TypeSafeModelRouterRunState {
   const _TypeSafeModelRouterRunState({
     required this.router,
     required this.decision,
-    required this.sendChunk,
-    required this.inputStream,
+    required this.latestCreationId,
   });
 
   final TypeSafeModelRouter router;
   final TypeSafeRouteDecision decision;
-  final Object sendChunk;
-  final Object? inputStream;
-
-  bool matches<Chunk, Input, Init>(ActionFnArg<Chunk, Input, Init> context) =>
-      identical(sendChunk, context.sendChunk) &&
-      identical(inputStream, context.inputStream);
+  final int latestCreationId;
 }
 
 Message? _latestUserMessage(List<Message> messages) {
