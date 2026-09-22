@@ -3,6 +3,7 @@ library;
 
 export 'package:typesafe_ai_sdk/typesafe_ai_sdk.dart';
 
+export 'src/auto_mode.dart' show TypeSafeAutoMode;
 export 'src/classifier.dart'
     show TypeSafeClassifier, typeSafeClassifierActionType;
 export 'src/model_router.dart'

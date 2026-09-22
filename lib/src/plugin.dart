@@ -4,6 +4,7 @@ import 'package:logging/logging.dart';
 import 'package:meta/meta.dart';
 import 'package:typesafe_ai_sdk/typesafe_ai_sdk.dart';
 
+import 'auto_mode.dart';
 import 'classifier.dart';
 import 'errors.dart';
 import 'model_router.dart';
@@ -106,6 +107,7 @@ final class TypeSafePlugin extends GenkitPlugin {
   TypeSafeClient? _client;
   final _classifiers = <String, TypeSafeClassifier>{};
   final _modelRouters = <String, TypeSafeModelRouter>{};
+  final _autoModes = <String, TypeSafeAutoMode>{};
   var _initialized = false;
   var _closed = false;
 
@@ -240,6 +242,76 @@ final class TypeSafePlugin extends GenkitPlugin {
     return router;
   }
 
+  TypeSafeAutoMode defineAutoMode({
+    required String name,
+    required List<String> tools,
+    String instructions = defaultAutoModeInstructions,
+    NoulCriteria criteria = defaultAutoModeCriteria,
+    String? classifierModel,
+    Duration? timeout,
+    RetryPolicy? retry,
+    Map<String, String>? headers,
+  }) {
+    _ensureDefinitionsOpen();
+    _validateDefinitionName(name);
+    _ensureNameAvailable(name);
+    if (tools.isEmpty) {
+      throw GenkitException(
+        'Auto Mode "$name" requires at least one tool.',
+        status: StatusCodes.INVALID_ARGUMENT,
+      );
+    }
+    final normalizedTools = <String>[];
+    for (final tool in tools) {
+      final normalized = tool.trim();
+      if (normalized.isEmpty || normalizedTools.contains(normalized)) {
+        throw GenkitException(
+          'Auto Mode "$name" requires distinct, nonblank tool names.',
+          status: StatusCodes.INVALID_ARGUMENT,
+        );
+      }
+      normalizedTools.add(normalized);
+    }
+
+    final normalizedInstructions = snapshotJson(
+      instructions,
+      field: 'Auto Mode "$name" instructions',
+    ) as String;
+    final normalizedCriteria =
+        snapshotJson(criteria.toJson(), field: 'Auto Mode "$name" criteria')!
+            as Map<String, dynamic>;
+    final question = Noul(
+      instructions: normalizedInstructions,
+      criteria: NoulCriteria(
+        whenTrue: normalizedCriteria['true'],
+        whenFalse: normalizedCriteria['false'],
+      ),
+    );
+    final classifier = _buildClassifier(
+      name: name,
+      questions: {autoModeQuestionName: question},
+      model: classifierModel,
+      timeout: timeout,
+      retry: retry,
+      headers: headers,
+      typesafeMetadata: {
+        'kind': 'auto-mode',
+        'middleware': '${this.name}/$name',
+        'tools': List<String>.unmodifiable(normalizedTools),
+      },
+    );
+    final autoMode = TypeSafeAutoMode.internal(
+      name: '${this.name}/$name',
+      localName: name,
+      tools: normalizedTools,
+      question: question,
+      classifier: classifier,
+    );
+    _classifiers[name] = classifier;
+    _autoModes[name] = autoMode;
+    return autoMode;
+  }
+
   TypeSafeClassifier _buildClassifier({
     required String name,
     required Map<String, Question<Answer>> questions,
@@ -280,6 +352,7 @@ final class TypeSafePlugin extends GenkitPlugin {
     _freezeDefinitions();
     return [
       for (final router in _modelRouters.values) router.middlewareDefinition,
+      for (final autoMode in _autoModes.values) autoMode.middlewareDefinition,
     ];
   }
 

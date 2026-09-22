@@ -49,4 +49,15 @@ void main() {
     expect(plugin.middleware().single.name, typedRouter.name);
     plugin.close();
   });
+
+  test('public barrel exports Auto Mode reference', () {
+    final plugin = typeSafeAI(apiKey: 'test-key');
+    final TypeSafeAutoMode guard = plugin.defineAutoMode(
+      name: 'guard-writes',
+      tools: ['delete'],
+    );
+    expect(guard.name, 'typesafe/guard-writes');
+    expect(plugin.middleware().single.name, guard.name);
+    plugin.close();
+  });
 }
