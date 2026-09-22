@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:genkit/genkit.dart';
@@ -526,6 +527,216 @@ void main() {
     },
   );
 
+  test(
+    'nested generation with the same router gets an independent decision',
+    () async {
+      var typeSafeCalls = 0;
+      TypeSafeRouteDecision? outerDecision;
+      TypeSafeRouteDecision? nestedDecision;
+      final plugin = TypeSafePlugin(
+        apiKey: 'test-key',
+        httpClient: MockClient((request) async {
+          typeSafeCalls++;
+          final text = _typeSafeStateText(request);
+          return modelRouteResponse(
+            text.contains('nested') ? 'powerful' : 'fast',
+          );
+        }),
+      );
+      final router = plugin.defineModelRouter(
+        name: 'cost-router',
+        instructions: 'Choose.',
+        routes: {
+          'fast': TypeSafeModelRoute(
+            model: modelRef('fast-model'),
+            criteria: 'Simple.',
+          ),
+          'powerful': TypeSafeModelRoute(
+            model: modelRef('powerful-model'),
+            criteria: 'Complex.',
+          ),
+        },
+      );
+      final ai = Genkit(plugins: [plugin], isDevEnv: false);
+      ai.defineModel(
+        name: 'fast-model',
+        fn: (request, ctx) async {
+          final text = _latestRequestText(request);
+          if (text == 'outer fast') {
+            outerDecision = router.decisionFromContext(ctx.context);
+            final nested = await ai.generate(
+              prompt: 'nested powerful',
+              context: ctx.context,
+              use: [router],
+            );
+            return _textResponse('outer:${nested.text}');
+          }
+          return _textResponse('nested-wrong-fast');
+        },
+      );
+      ai.defineModel(
+        name: 'powerful-model',
+        fn: (request, ctx) async {
+          nestedDecision = router.decisionFromContext(ctx.context);
+          return _textResponse('nested-powerful');
+        },
+      );
+
+      try {
+        final response = await ai.generate(prompt: 'outer fast', use: [router]);
+
+        expect(response.text, 'outer:nested-powerful');
+        expect(typeSafeCalls, 2);
+        expect(outerDecision?.route, 'fast');
+        expect(nestedDecision?.route, 'powerful');
+      } finally {
+        plugin.close();
+        await ai.shutdown();
+      }
+    },
+  );
+
+  test('nested generation may use a distinct router independently', () async {
+    var typeSafeCalls = 0;
+    var nestedModelCalls = 0;
+    FinishReason? nestedFinishReason;
+    TypeSafeRouteDecision? inheritedOuterDecision;
+    TypeSafeRouteDecision? nestedRouteDecision;
+    final plugin = TypeSafePlugin(
+      apiKey: 'test-key',
+      httpClient: MockClient((request) async {
+        typeSafeCalls++;
+        final text = _typeSafeStateText(request);
+        return modelRouteResponse(
+          text.contains('nested') ? 'powerful' : 'fast',
+        );
+      }),
+    );
+    final outerRouter = plugin.defineModelRouter(
+      name: 'outer-router',
+      instructions: 'Choose.',
+      routes: {
+        'fast': TypeSafeModelRoute(
+          model: modelRef('outer-model'),
+          criteria: 'Outer request.',
+        ),
+      },
+    );
+    final nestedRouter = plugin.defineModelRouter(
+      name: 'nested-router',
+      instructions: 'Choose.',
+      routes: {
+        'powerful': TypeSafeModelRoute(
+          model: modelRef('nested-model'),
+          criteria: 'Nested request.',
+        ),
+      },
+    );
+    final ai = Genkit(plugins: [plugin], isDevEnv: false);
+    ai.defineModel(
+      name: 'outer-model',
+      fn: (request, ctx) async {
+        final nested = await ai.generate(
+          prompt: 'nested powerful',
+          context: ctx.context,
+          use: [nestedRouter],
+        );
+        nestedFinishReason = nested.finishReason;
+        return _textResponse('outer:${nested.text}');
+      },
+    );
+    ai.defineModel(
+      name: 'nested-model',
+      fn: (request, ctx) async {
+        nestedModelCalls++;
+        inheritedOuterDecision = outerRouter.decisionFromContext(ctx.context);
+        nestedRouteDecision = nestedRouter.decisionFromContext(ctx.context);
+        return _textResponse('nested-powerful');
+      },
+    );
+
+    try {
+      final response = await ai.generate(
+        prompt: 'outer fast',
+        use: [outerRouter],
+      );
+
+      expect(response.text, 'outer:nested-powerful');
+      expect(nestedFinishReason, FinishReason.stop);
+      expect(typeSafeCalls, 2);
+      expect(nestedModelCalls, 1);
+      expect(inheritedOuterDecision?.route, 'fast');
+      expect(nestedRouteDecision?.route, 'powerful');
+    } finally {
+      plugin.close();
+      await ai.shutdown();
+    }
+  });
+
+  test('asynchronous descendants after a run classify independently', () async {
+    var typeSafeCalls = 0;
+    final trigger = Completer<void>();
+    late Future<GenerateResponseHelper> descendant;
+    final plugin = TypeSafePlugin(
+      apiKey: 'test-key',
+      httpClient: MockClient((request) async {
+        typeSafeCalls++;
+        final text = _typeSafeStateText(request);
+        return modelRouteResponse(
+          text.contains('descendant') ? 'powerful' : 'fast',
+        );
+      }),
+    );
+    final router = plugin.defineModelRouter(
+      name: 'cost-router',
+      instructions: 'Choose.',
+      routes: {
+        'fast': TypeSafeModelRoute(
+          model: modelRef('fast-model'),
+          criteria: 'Simple.',
+        ),
+        'powerful': TypeSafeModelRoute(
+          model: modelRef('powerful-model'),
+          criteria: 'Complex.',
+        ),
+      },
+    );
+    final ai = Genkit(plugins: [plugin], isDevEnv: false);
+    ai.defineModel(
+      name: 'fast-model',
+      fn: (request, ctx) async {
+        if (_latestRequestText(request) == 'outer fast') {
+          descendant = trigger.future.then(
+            (_) => ai.generate(
+              prompt: 'descendant powerful',
+              context: ctx.context,
+              use: [router],
+            ),
+          );
+          return _textResponse('outer-fast');
+        }
+        return _textResponse('descendant-wrong-fast');
+      },
+    );
+    ai.defineModel(
+      name: 'powerful-model',
+      fn: (request, ctx) async => _textResponse('descendant-powerful'),
+    );
+
+    try {
+      final outer = await ai.generate(prompt: 'outer fast', use: [router]);
+      trigger.complete();
+      final nested = await descendant;
+
+      expect(outer.text, 'outer-fast');
+      expect(nested.text, 'descendant-powerful');
+      expect(typeSafeCalls, 2);
+    } finally {
+      plugin.close();
+      await ai.shutdown();
+    }
+  });
+
   test('isolates route decisions across concurrent generation runs', () async {
     var typeSafeCalls = 0;
     var fastModelCalls = 0;
@@ -689,6 +900,72 @@ void main() {
     }
   });
 
+  test(
+    'preserves raw generate action init through routing middleware',
+    () async {
+      final plugin = TypeSafePlugin(
+        apiKey: 'test-key',
+        httpClient: MockClient((request) async => modelRouteResponse('fast')),
+      );
+      final router = plugin.defineModelRouter(
+        name: 'cost-router',
+        instructions: 'Choose.',
+        routes: {
+          'fast': TypeSafeModelRoute(
+            model: modelRef('fast-model'),
+            criteria: 'Simple.',
+          ),
+        },
+      );
+      Object? capturedInit;
+      final middlewarePlugin = _TestMiddlewarePlugin([
+        genkit_plugin.defineMiddleware<Object?>(
+          name: 'test/capture-init',
+          create: (config, context) =>
+              _CallbackMiddleware((envelope, ctx, next) {
+                final dynamic dynamicContext = ctx;
+                capturedInit = dynamicContext.init;
+                return next(envelope, ctx);
+              }),
+        ),
+      ]);
+      final ai = Genkit(plugins: [plugin, middlewarePlugin], isDevEnv: false);
+      ai.defineModel(
+        name: 'fast-model',
+        fn: (request, ctx) async => _textResponse('fast'),
+      );
+      final rawInit = <String, Object?>{'session': 'raw-init'};
+
+      try {
+        final generateAction = await ai.registry.lookupAction(
+          ActionType.util,
+          'generate',
+        );
+        await generateAction!.runRaw(
+          GenerateActionOptions(
+            model: 'fast-model',
+            messages: [
+              Message(
+                role: Role.user,
+                content: [TextPart(text: 'simple')],
+              ),
+            ],
+            use: [
+              MiddlewareRef(name: router.name),
+              MiddlewareRef(name: 'test/capture-init'),
+            ],
+          ).toJson(),
+          init: rawInit,
+        );
+
+        expect(capturedInit, same(rawInit));
+      } finally {
+        plugin.close();
+        await ai.shutdown();
+      }
+    },
+  );
+
   test('forwards streaming chunks from the selected model', () async {
     final plugin = TypeSafePlugin(
       apiKey: 'test-key',
@@ -847,3 +1124,16 @@ ModelResponse _textResponse(String text) => ModelResponse(
     content: [TextPart(text: text)],
   ),
 );
+
+String _typeSafeStateText(http.Request request) {
+  final body = jsonDecode(request.body) as Map<String, dynamic>;
+  final state = body['state'] as Map<String, dynamic>;
+  final content = state['content'] as List<dynamic>;
+  return (content.first as Map<String, dynamic>)['text'] as String;
+}
+
+String _latestRequestText(ModelRequest request) => request.messages.last.content
+    .where((part) => part.isText)
+    .map((part) => part.text)
+    .whereType<String>()
+    .join();

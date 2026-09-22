@@ -9,7 +9,7 @@ import 'classifier.dart';
 
 const modelRouteQuestionName = 'modelRoute';
 const _routeDecisionsContextKey = 'genkit_typesafe_ai/model-router-decisions';
-final _activeModelRouterZoneKey = Object();
+final _modelRouterRunStateZoneKey = Object();
 
 final class TypeSafeModelRoute {
   const TypeSafeModelRoute({required this.model, required this.criteria});
@@ -124,9 +124,6 @@ final class TypeSafeModelRouter implements GenerateMiddlewareRef<Object?> {
   @internal
   final TypeSafeClassifier classifier;
 
-  @internal
-  final Object decisionZoneKey = Object();
-
   TypeSafeRouteDecision? decisionFromContext(Map<String, dynamic>? context) {
     final decisions = context?[_routeDecisionsContextKey];
     if (decisions is! Map) return null;
@@ -157,17 +154,25 @@ final class _TypeSafeModelRouterMiddleware extends GenerateMiddleware {
     )
     next,
   ) async {
-    final active = Zone.current[_activeModelRouterZoneKey];
-    if (active is TypeSafeModelRouter && !identical(active, router)) {
+    final inheritedState = Zone.current[_modelRouterRunStateZoneKey];
+    // Zones also flow into nested and delayed generation calls. Recursive
+    // Genkit turns are identified by their positive turn number; turn zero
+    // reuses state only while traversing the same public action context.
+    final activeState =
+        inheritedState is _TypeSafeModelRouterRunState &&
+            (envelope.currentTurn > 0 || inheritedState.matches(ctx))
+        ? inheritedState
+        : null;
+    if (activeState != null && !identical(activeState.router, router)) {
       throw GenkitException(
         'Only one TypeSafe model router may be used in a generation run.',
         status: StatusCodes.FAILED_PRECONDITION,
       );
     }
 
-    final existing = Zone.current[router.decisionZoneKey];
-    if (existing is TypeSafeRouteDecision) {
-      final route = router.resolvedRoutes[existing.route];
+    if (activeState != null) {
+      final decision = activeState.decision;
+      final route = router.resolvedRoutes[decision.route];
       if (route == null) {
         throw GenkitException(
           'TypeSafe model router "${router.localName}" retained an unknown route.',
@@ -176,7 +181,7 @@ final class _TypeSafeModelRouterMiddleware extends GenerateMiddleware {
       }
       return next(
         _routeEnvelope(envelope, route),
-        _withRouteDecision(ctx, router, existing),
+        _withRouteDecision(ctx, router, decision),
       );
     }
 
@@ -209,11 +214,33 @@ final class _TypeSafeModelRouterMiddleware extends GenerateMiddleware {
         _withRouteDecision(ctx, router, decision),
       ),
       zoneValues: {
-        _activeModelRouterZoneKey: router,
-        router.decisionZoneKey: decision,
+        _modelRouterRunStateZoneKey: _TypeSafeModelRouterRunState(
+          router: router,
+          decision: decision,
+          sendChunk: ctx.sendChunk,
+          inputStream: ctx.inputStream,
+        ),
       },
     );
   }
+}
+
+final class _TypeSafeModelRouterRunState {
+  const _TypeSafeModelRouterRunState({
+    required this.router,
+    required this.decision,
+    required this.sendChunk,
+    required this.inputStream,
+  });
+
+  final TypeSafeModelRouter router;
+  final TypeSafeRouteDecision decision;
+  final Object sendChunk;
+  final Object? inputStream;
+
+  bool matches<Chunk, Input, Init>(ActionFnArg<Chunk, Input, Init> context) =>
+      identical(sendChunk, context.sendChunk) &&
+      identical(inputStream, context.inputStream);
 }
 
 Message? _latestUserMessage(List<Message> messages) {
@@ -236,8 +263,8 @@ GenerateTurnState _routeEnvelope(
   messageIndex: envelope.messageIndex,
 );
 
-ActionFnArg<ModelResponseChunk, GenerateActionOptions, void> _withRouteDecision(
-  ActionFnArg<ModelResponseChunk, GenerateActionOptions, void> context,
+ActionFnArg<Chunk, Input, Init> _withRouteDecision<Chunk, Input, Init>(
+  ActionFnArg<Chunk, Input, Init> context,
   TypeSafeModelRouter router,
   TypeSafeRouteDecision decision,
 ) {
@@ -256,7 +283,7 @@ ActionFnArg<ModelResponseChunk, GenerateActionOptions, void> _withRouteDecision(
     sendChunk: context.sendChunk,
     context: copiedContext,
     inputStream: context.inputStream,
-    init: null,
+    init: context.init,
     cancel: context.cancel,
   );
 }
