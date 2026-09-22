@@ -224,6 +224,7 @@ void main() {
       final ai = Genkit(plugins: [plugin], isDevEnv: false);
       var executions = 0;
       var modelCalls = 0;
+      ToolResponsePart? resumedToolResponse;
       final tool = ai.defineTool<Map<String, dynamic>, String>(
         name: 'files/delete',
         description: 'Deletes the report.',
@@ -236,6 +237,8 @@ void main() {
         name: 'test-model',
         fn: (request, ctx) async {
           modelCalls++;
+          resumedToolResponse =
+              request.messages.last.content.single.toolResponsePart;
           return ModelResponse(
             finishReason: FinishReason.stop,
             message: Message(
@@ -288,6 +291,13 @@ void main() {
         expect(modelCalls, 1);
         expect(executions, 0);
         expect(requests, hasLength(1));
+        expect(resumedToolResponse?.toolResponse.ref, 'call-1');
+        expect(
+          resumedToolResponse?.toolResponse.output,
+          contains('was blocked'),
+        );
+        // Genkit 0.17 reconstructs restarted tool results without metadata.
+        expect(resumedToolResponse?.metadata, isNull);
         final state = (jsonDecode(requests.single.body) as Map)['state'] as Map;
         expect(state['tool_description'], 'Deletes the report.');
         expect((state['messages'] as List).first['role'], 'user');

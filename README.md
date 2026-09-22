@@ -173,7 +173,10 @@ On Genkit 0.17, restarting a namespaced tool requires its **full registered
 name** in both the saved tool-request message and the `interruptRestart` tool
 request. A normal model call may store only its short wire name; callers must
 normalize that saved history themselves before restarting. Auto Mode does not
-rewrite it. Genkit may change this behavior in later versions.
+rewrite it. Genkit 0.17 also drops tool-result metadata when rebuilding the
+resumed conversation: the refusal text and call reference survive, but
+`typesafe.blocked` does not. Inspect the classifier action trace for the
+decision on restarted calls. Genkit may change this behavior in later versions.
 
 ## Plugin options and models
 
