@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:genkit_typesafe_ai/src/model_router.dart';
 import 'package:http/http.dart' as http;
 
 http.Response systemOneResponse({
@@ -15,6 +16,21 @@ http.Response systemOneResponse({
   }),
   200,
   headers: {'content-type': 'application/json'},
+);
+
+http.Response modelRouteResponse(
+  String route, {
+  double confidence = 0.9,
+  Map<String, double>? probabilities,
+}) => systemOneResponse(
+  answers: {
+    modelRouteQuestionName: {
+      'type': 'choice',
+      'choice': route,
+      'confidence': confidence,
+      'probabilities': probabilities ?? {route: 1.0},
+    },
+  },
 );
 
 http.Response modelsResponse() => http.Response(

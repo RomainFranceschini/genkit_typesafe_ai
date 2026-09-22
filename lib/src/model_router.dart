@@ -133,8 +133,96 @@ final class TypeSafeModelRouter implements GenerateMiddlewareRef<Object?> {
   GenerateMiddlewareDef<Object?> get middlewareDefinition =>
       defineMiddleware<Object?>(
         name: name,
-        create: (config, context) => _TypeSafeModelRouterMiddleware(),
+        create: (config, context) => _TypeSafeModelRouterMiddleware(this),
       );
 }
 
-final class _TypeSafeModelRouterMiddleware extends GenerateMiddleware {}
+final class _TypeSafeModelRouterMiddleware extends GenerateMiddleware {
+  _TypeSafeModelRouterMiddleware(this.router);
+
+  final TypeSafeModelRouter router;
+
+  @override
+  Future<GenerateResponseHelper> generate(
+    GenerateTurnState envelope,
+    ActionFnArg<ModelResponseChunk, GenerateActionOptions, void> ctx,
+    Future<GenerateResponseHelper> Function(
+      GenerateTurnState envelope,
+      ActionFnArg<ModelResponseChunk, GenerateActionOptions, void> ctx,
+    )
+    next,
+  ) async {
+    final latestUser = _latestUserMessage(envelope.request.messages);
+    if (latestUser == null) {
+      throw GenkitException(
+        'TypeSafe model router "${router.localName}" requires a user message.',
+        status: StatusCodes.INVALID_ARGUMENT,
+      );
+    }
+
+    final response = await router.classifier(latestUser, cancel: ctx.cancel);
+    final answer = response.get(router.question);
+    final route = router.resolvedRoutes[answer.choice];
+    if (route == null) {
+      throw GenkitException(
+        'TypeSafe model router "${router.localName}" selected an unknown route.',
+        status: StatusCodes.INTERNAL,
+      );
+    }
+    final decision = TypeSafeRouteDecision(
+      routerName: router.name,
+      route: answer.choice,
+      modelName: route.modelName,
+      answer: answer,
+    );
+    return next(
+      _routeEnvelope(envelope, route),
+      _withRouteDecision(ctx, router, decision),
+    );
+  }
+}
+
+Message? _latestUserMessage(List<Message> messages) {
+  for (final message in messages.reversed) {
+    if (message.role == Role.user) return message;
+  }
+  return null;
+}
+
+GenerateTurnState _routeEnvelope(
+  GenerateTurnState envelope,
+  ResolvedTypeSafeModelRoute route,
+) => (
+  request: GenerateActionOptions.fromJson({
+    ...envelope.request.toJson(),
+    'model': route.modelName,
+    'config': route.config,
+  }),
+  currentTurn: envelope.currentTurn,
+  messageIndex: envelope.messageIndex,
+);
+
+ActionFnArg<ModelResponseChunk, GenerateActionOptions, void> _withRouteDecision(
+  ActionFnArg<ModelResponseChunk, GenerateActionOptions, void> context,
+  TypeSafeModelRouter router,
+  TypeSafeRouteDecision decision,
+) {
+  final copiedContext = <String, dynamic>{...?context.context};
+  final existingDecisions = copiedContext[_routeDecisionsContextKey];
+  final decisions = <String, dynamic>{
+    if (existingDecisions is Map)
+      for (final entry in existingDecisions.entries)
+        if (entry.key is String) entry.key as String: entry.value,
+    router.name: decision,
+  };
+  copiedContext[_routeDecisionsContextKey] = decisions;
+
+  return (
+    streamingRequested: context.streamingRequested,
+    sendChunk: context.sendChunk,
+    context: copiedContext,
+    inputStream: context.inputStream,
+    init: null,
+    cancel: context.cancel,
+  );
+}
