@@ -126,6 +126,55 @@ names, but never include model configs, credentials, or headers. Only one
 distinct TypeSafe router may be used in a generation run; repeating the same
 router reference is idempotent.
 
+## Auto Mode tool-risk middleware
+
+Choose the tools to guard when defining Auto Mode, then pass the named
+middleware reference through `use`:
+
+```dart
+final typeSafe = typeSafeAI();
+final autoMode = typeSafe.defineAutoMode(
+  name: 'guard-writes',
+  tools: [deleteFile.name],
+  criteria: const NoulCriteria(
+    whenTrue: 'Deletes data or changes access without clear authorization.',
+    whenFalse: 'Read-only, reversible, and explicitly authorized by the user.',
+  ),
+);
+final ai = Genkit(plugins: [typeSafe, providerPlugin]);
+
+final response = await ai.generate(
+  prompt: 'Handle this request.',
+  tools: [deleteFile, readFile],
+  use: [autoMode],
+);
+```
+
+Only listed tools are checked; other tools run normally. Before **each** guarded
+call, Auto Mode sends the proposed name, arguments, available description, and
+up to 30 recent messages to TypeSafe. Only explicit user messages count as
+authorization in its default risk instructions. A risk probability below `0.5`
+allows the call. At or above `0.5`, it skips the tool and returns a tool result
+explaining the refusal (with `typesafe.blocked` metadata), so the model can
+continue. A TypeSafe failure fails the generation and does not execute the
+guarded tool; Genkit reports tool-hook failures with an `INTERNAL` top-level
+status and retains the mapped TypeSafe error as the underlying cause. Auto Mode
+does not request human approval; use Genkit's `toolApproval` middleware for
+interrupt-and-approve flows.
+
+The classification input includes conversation contents and tool arguments:
+they go to TypeSafe and can appear in Genkit classifier-action traces. Do not
+include secrets in them unless that data transfer and trace visibility are
+acceptable. Auto Mode guards tools in the Genkit generation loop, not direct
+tool action invocations. It can be combined with the model router. Repeating an
+Auto Mode reference evaluates a permitted call once per occurrence.
+
+On Genkit 0.17, restarting a namespaced tool requires its **full registered
+name** in both the saved tool-request message and the `interruptRestart` tool
+request. A normal model call may store only its short wire name; callers must
+normalize that saved history themselves before restarting. Auto Mode does not
+rewrite it. Genkit may change this behavior in later versions.
+
 ## Plugin options and models
 
 `typeSafeAI` accepts `apiKey`, `baseUrl`, `defaultModel`, `logger`, `retry`,

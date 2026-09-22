@@ -26,6 +26,10 @@ Future<void> main() async {
       ),
     },
   );
+  typeSafe.defineAutoMode(
+    name: 'guard-writes',
+    tools: ['provider/delete-file'],
+  );
   final ai = Genkit(plugins: [typeSafe]);
   try {
     final response = await triage('I was charged twice. Please fix this now.');

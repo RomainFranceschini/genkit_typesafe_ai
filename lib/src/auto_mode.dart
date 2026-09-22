@@ -106,6 +106,12 @@ final class _AutoModeMiddleware extends GenerateMiddleware {
     if (!_isGuarded(call.name, turn)) return next(request, ctx);
 
     final toolDefinition = _toolDefinition(call.name, turn);
+    final registeredTool = toolDefinition == null
+        ? await ai.registry.lookupAction(ActionType.tool, call.name)
+        : null;
+    final description =
+        toolDefinition?.description ??
+        (registeredTool is Tool ? registeredTool.description : null);
     final messages = [
       ...?turn?.messages,
       if (turn?.assistantMessage case final Message message) message,
@@ -118,11 +124,16 @@ final class _AutoModeMiddleware extends GenerateMiddleware {
                 .map((message) => message.toJson())
                 .toList(),
       'tool_call': {'id': call.ref, 'name': call.name, 'args': call.input},
-      if (toolDefinition != null)
-        'tool_description': toolDefinition.description,
+      'tool_description': ?description,
     };
     final response = await definition.classifier(state, cancel: ctx.cancel);
     final probability = response.get(definition.question).noul;
+    if (!probability.isFinite || probability < 0 || probability > 1) {
+      throw GenkitException(
+        'Auto Mode returned an invalid risk probability.',
+        status: StatusCodes.INTERNAL,
+      );
+    }
     if (probability < 0.5) return next(request, ctx);
 
     return ToolResponsePart(
