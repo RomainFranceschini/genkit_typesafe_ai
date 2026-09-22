@@ -65,6 +65,67 @@ Retrieve each typed answer with `response.get(question)`, such as
 `response.get(sentiment).choice`, `response.get(needsFollowUp).noul`, or
 `response.get(priority).score`.
 
+## Model routing middleware
+
+Define a named router from any registered Genkit model references, then pass the
+router through `use`:
+
+```dart
+final typeSafe = typeSafeAI();
+final router = typeSafe.defineModelRouter(
+  name: 'cost-router',
+  instructions: 'Choose the least costly capable model.',
+  routes: {
+    'fast': TypeSafeModelRoute(
+      model: modelRef(
+        'provider/fast',
+        config: {'temperature': 0.1},
+      ),
+      criteria: 'Simple, well-scoped tasks.',
+    ),
+    'powerful': TypeSafeModelRoute(
+      model: modelRef(
+        'provider/powerful',
+        config: {'temperature': 0.7},
+      ),
+      criteria: 'Complex tasks requiring deeper reasoning.',
+    ),
+  },
+);
+final ai = Genkit(plugins: [typeSafe, providerPlugin]);
+
+final response = await ai.generate(
+  prompt: 'Summarize this support request.',
+  use: [router],
+);
+```
+
+The router classifies the latest user message once and keeps the selected model
+and that model reference's config for every tool-loop turn. Low-confidence
+answers still select their route; v1 does not apply a confidence threshold or
+fallback. TypeSafe or routing failures produce Genkit failed responses and do
+not call the original model or another fallback model.
+
+The complete typed decision, including confidence and probabilities, is copied
+into Genkit context for downstream middleware and tools. A tool can inspect it
+without depending on the package's internal context key:
+
+```dart
+final inspectRoute = ai.defineTool<Map<String, dynamic>, String>(
+  name: 'inspectRoute',
+  description: 'Reports the selected route.',
+  fn: (input, args) async {
+    final decision = router.decisionFromContext(args.context);
+    return .response(decision?.route ?? 'no route');
+  },
+);
+```
+
+Router metadata and `TypeSafeRouteDecision.toJson()` include route and model
+names, but never include model configs, credentials, or headers. Only one
+distinct TypeSafe router may be used in a generation run; repeating the same
+router reference is idempotent.
+
 ## Plugin options and models
 
 `typeSafeAI` accepts `apiKey`, `baseUrl`, `defaultModel`, `logger`, `retry`,
@@ -117,6 +178,6 @@ use a server-side proxy instead whenever possible.
 
 ## Limitations
 
-This subproject supports TypeSafe classifier actions and model discovery only.
-It does not provide `ai.generate`, chat, streaming, tools, embeddings, or
-middleware.
+This package does not provide a generative model, chat model, embeddings, or a
+model-provider implementation. Model routing requires separately registered
+Genkit models from the provider plugins selected by the application.

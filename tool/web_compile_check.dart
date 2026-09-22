@@ -10,6 +10,16 @@ void main() {
     name: 'web-check',
     questions: {'safe': Noul(instructions: 'Is this safe?')},
   );
+  plugin.defineModelRouter(
+    name: 'web-router',
+    instructions: 'Choose a route.',
+    routes: {
+      'fast': TypeSafeModelRoute(
+        model: modelRef('provider/fast'),
+        criteria: 'Simple browser-safe task.',
+      ),
+    },
+  );
   Genkit(plugins: [plugin]);
   plugin.close();
 }

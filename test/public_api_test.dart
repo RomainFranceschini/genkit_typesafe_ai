@@ -26,4 +26,27 @@ void main() {
       await ai.shutdown();
     }
   });
+
+  test('public barrel registers a TypeSafe model router', () {
+    final plugin = typeSafeAI(apiKey: 'test-key');
+    final router = plugin.defineModelRouter(
+      name: 'cost-router',
+      instructions: 'Choose a route.',
+      routes: {
+        'fast': TypeSafeModelRoute(
+          model: modelRef('fast-model'),
+          criteria: 'Simple tasks.',
+        ),
+      },
+    );
+    final TypeSafeModelRouter typedRouter = router;
+    final TypeSafeRouteDecision? decision = typedRouter.decisionFromContext(
+      null,
+    );
+
+    expect(typedRouter.name, 'typesafe/cost-router');
+    expect(decision, isNull);
+    expect(plugin.middleware().single.name, typedRouter.name);
+    plugin.close();
+  });
 }
