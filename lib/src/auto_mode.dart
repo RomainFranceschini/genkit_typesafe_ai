@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:genkit/genkit.dart' show GenkitAI;
 import 'package:genkit/plugin.dart';
 import 'package:meta/meta.dart';
@@ -53,4 +55,124 @@ final class _AutoModeMiddleware extends GenerateMiddleware {
 
   final TypeSafeAutoMode definition;
   final GenkitAI ai;
+  final Object _zoneKey = Object();
+
+  @override
+  Future<GenerateResponseHelper> generate(
+    GenerateTurnState envelope,
+    ActionFnArg<ModelResponseChunk, GenerateActionOptions, void> ctx,
+    Future<GenerateResponseHelper> Function(
+      GenerateTurnState,
+      ActionFnArg<ModelResponseChunk, GenerateActionOptions, void>,
+    )
+    next,
+  ) {
+    final turn = _AutoModeTurnState(
+      messages: envelope.request.messages,
+      configuredTools: envelope.request.tools ?? const [],
+    );
+    return runZoned(() => next(envelope, ctx), zoneValues: {_zoneKey: turn});
+  }
+
+  @override
+  Future<ModelResponse> model(
+    ModelRequest request,
+    ActionFnArg<ModelResponseChunk, ModelRequest, void> ctx,
+    Future<ModelResponse> Function(
+      ModelRequest,
+      ActionFnArg<ModelResponseChunk, ModelRequest, void>,
+    )
+    next,
+  ) async {
+    final turn = Zone.current[_zoneKey] as _AutoModeTurnState?;
+    if (turn != null) turn.toolDefinitions = request.tools ?? const [];
+    final response = await next(request, ctx);
+    if (turn != null) turn.assistantMessage = response.message;
+    return response;
+  }
+
+  @override
+  Future<ToolResponsePart> tool(
+    ToolRequestPart request,
+    ActionFnArg<void, dynamic, void> ctx,
+    Future<ToolResponsePart> Function(
+      ToolRequestPart,
+      ActionFnArg<void, dynamic, void>,
+    )
+    next,
+  ) async {
+    final call = request.toolRequest;
+    final turn = Zone.current[_zoneKey] as _AutoModeTurnState?;
+    if (!_isGuarded(call.name, turn)) return next(request, ctx);
+
+    final toolDefinition = _toolDefinition(call.name, turn);
+    final messages = [
+      ...?turn?.messages,
+      if (turn?.assistantMessage case final Message message) message,
+    ];
+    final state = <String, Object?>{
+      'messages': messages.length <= 30
+          ? messages.map((message) => message.toJson()).toList()
+          : messages
+                .skip(messages.length - 30)
+                .map((message) => message.toJson())
+                .toList(),
+      'tool_call': {'id': call.ref, 'name': call.name, 'args': call.input},
+      if (toolDefinition != null)
+        'tool_description': toolDefinition.description,
+    };
+    final response = await definition.classifier(state, cancel: ctx.cancel);
+    final probability = response.get(definition.question).noul;
+    if (probability < 0.5) return next(request, ctx);
+
+    return ToolResponsePart(
+      toolResponse: ToolResponse(
+        ref: call.ref,
+        name: call.name,
+        output:
+            'The tool call `${call.name}` was blocked because it was classified as risky '
+            '(probability: ${probability.toStringAsFixed(2)}). The tool was not executed.',
+      ),
+      metadata: {
+        'typesafe': {'blocked': true, 'riskProbability': probability},
+      },
+    );
+  }
+
+  bool _isGuarded(String requestedName, _AutoModeTurnState? turn) {
+    final originalName = _toolDefinition(
+      requestedName,
+      turn,
+    )?.metadata?['originalName'];
+    return definition.tools.any(
+      (name) =>
+          name == requestedName ||
+          name == originalName ||
+          _shortName(name) == requestedName,
+    );
+  }
+
+  ToolDefinition? _toolDefinition(
+    String requestedName,
+    _AutoModeTurnState? turn,
+  ) {
+    for (final tool in turn?.toolDefinitions ?? const <ToolDefinition>[]) {
+      if (tool.name == requestedName ||
+          tool.metadata?['originalName'] == requestedName) {
+        return tool;
+      }
+    }
+    return null;
+  }
+}
+
+String _shortName(String name) => name.substring(name.lastIndexOf('/') + 1);
+
+final class _AutoModeTurnState {
+  _AutoModeTurnState({required this.messages, required this.configuredTools});
+
+  final List<Message> messages;
+  final List<String> configuredTools;
+  List<ToolDefinition> toolDefinitions = const [];
+  Message? assistantMessage;
 }

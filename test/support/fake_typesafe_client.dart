@@ -33,6 +33,12 @@ http.Response modelRouteResponse(
   },
 );
 
+http.Response autoModeResponse(double probability) => systemOneResponse(
+  answers: {
+    'isRisky': {'type': 'noul', 'noul': probability},
+  },
+);
+
 http.Response modelsResponse() => http.Response(
   jsonEncode({
     'models': [
