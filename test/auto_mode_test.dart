@@ -166,18 +166,197 @@ void main() {
     });
   }
 
-  test('aborts before classification when already cancelled', () async {
-    final controller = CancellationController()..cancel();
+  test('aborts before classification when cancelled during the turn', () async {
+    final controller = CancellationController();
     final scenario = await _runScenario(
       probabilities: [],
       guarded: ['delete'],
       calls: [ToolRequest(ref: 'call-1', name: 'delete', input: {})],
       cancel: controller.token,
+      onFirstModelCall: controller.cancel,
     );
 
     expect(scenario.response.finishReason, FinishReason.aborted);
     expect(scenario.requests, isEmpty);
     expect(scenario.executed, isEmpty);
+  });
+
+  for (final (:description, :guarded, :toolNames, :called) in [
+    (
+      description: 'a prefixed alias of a guarded tool',
+      guarded: ['delete'],
+      toolNames: ['delete', 'read'],
+      called: 'x/delete',
+    ),
+    (
+      description: 'a prefixed alias of a guarded namespaced tool',
+      guarded: ['files/delete'],
+      toolNames: ['files/delete'],
+      called: 'x/delete',
+    ),
+    (
+      description: 'a short-name guard called by the full name',
+      guarded: ['delete'],
+      toolNames: ['files/delete'],
+      called: 'files/delete',
+    ),
+  ]) {
+    test('guards $description', () async {
+      final scenario = await _runScenario(
+        probabilities: [0.8],
+        guarded: guarded,
+        toolNames: toolNames,
+        calls: [ToolRequest(ref: 'call-1', name: called, input: {})],
+      );
+
+      expect(scenario.requests, hasLength(1));
+      expect(scenario.executed, isEmpty);
+      expect(scenario.response.finishReason, FinishReason.stop);
+    });
+  }
+
+  test('guards a full-name restart with a short-name guard', () async {
+    final requests = <http.Request>[];
+    final plugin = TypeSafePlugin(
+      apiKey: 'test-key',
+      httpClient: MockClient((request) async {
+        requests.add(request);
+        return autoModeResponse(0.8);
+      }),
+    );
+    final guard = plugin.defineAutoMode(name: 'guard', tools: ['delete']);
+    final ai = Genkit(plugins: [plugin], isDevEnv: false);
+    var executions = 0;
+    final tool = ai.defineTool<Map<String, dynamic>, String>(
+      name: 'files/delete',
+      description: 'Deletes the report.',
+      fn: (input, ctx) async {
+        executions++;
+        return .response('deleted');
+      },
+    );
+    ai.defineModel(
+      name: 'test-model',
+      fn: (request, ctx) async => ModelResponse(
+        finishReason: FinishReason.stop,
+        message: Message(
+          role: Role.model,
+          content: [TextPart(text: 'done')],
+        ),
+      ),
+    );
+    final call = ToolRequestPart(
+      toolRequest: ToolRequest(
+        ref: 'call-1',
+        name: 'files/delete',
+        input: {'path': 'report'},
+      ),
+    );
+
+    try {
+      final response = await ai.generate(
+        messages: [
+          Message(
+            role: Role.user,
+            content: [TextPart(text: 'Handle report')],
+          ),
+          Message(role: Role.model, content: [call]),
+        ],
+        model: modelRef('test-model'),
+        tools: [tool],
+        interruptRestart: [call],
+        use: [guard],
+      );
+      expect(response.finishReason, FinishReason.stop);
+      expect(requests, hasLength(1));
+      expect(executions, 0);
+    } finally {
+      plugin.close();
+      await ai.shutdown();
+    }
+  });
+
+  test('sends resumed tool responses to TypeSafe', () async {
+    final requests = <http.Request>[];
+    final plugin = TypeSafePlugin(
+      apiKey: 'test-key',
+      httpClient: MockClient((request) async {
+        requests.add(request);
+        return autoModeResponse(0.8);
+      }),
+    );
+    final guard = plugin.defineAutoMode(name: 'guard', tools: ['delete']);
+    final ai = Genkit(plugins: [plugin], isDevEnv: false);
+    final delete = ai.defineTool<Map<String, dynamic>, String>(
+      name: 'delete',
+      description: 'Deletes the report.',
+      fn: (input, ctx) async => .response('deleted'),
+    );
+    final confirm = ai.defineTool<Map<String, dynamic>, String>(
+      name: 'confirm',
+      description: 'Asks the user for confirmation.',
+      fn: (input, ctx) async => .response('unused'),
+    );
+    var modelCalls = 0;
+    ai.defineModel(
+      name: 'test-model',
+      fn: (request, ctx) async {
+        modelCalls++;
+        return ModelResponse(
+          finishReason: FinishReason.stop,
+          message: Message(
+            role: Role.model,
+            content: modelCalls == 1
+                ? [
+                    ToolRequestPart(
+                      toolRequest: ToolRequest(
+                        ref: 'delete-1',
+                        name: 'delete',
+                        input: <String, dynamic>{},
+                      ),
+                    ),
+                  ]
+                : [TextPart(text: 'done')],
+          ),
+        );
+      },
+    );
+    final ask = ToolRequestPart(
+      toolRequest: ToolRequest(
+        ref: 'ask-1',
+        name: 'confirm',
+        input: <String, dynamic>{},
+      ),
+    );
+
+    try {
+      final response = await ai.generate(
+        messages: [
+          Message(
+            role: Role.user,
+            content: [TextPart(text: 'Delete the report once I confirm.')],
+          ),
+          Message(role: Role.model, content: [ask]),
+        ],
+        model: modelRef('test-model'),
+        tools: [delete, confirm],
+        interruptRespond: [InterruptResponse(ask, 'yes, delete it')],
+        use: [guard],
+      );
+      expect(response.finishReason, FinishReason.stop);
+      final state = (jsonDecode(requests.single.body) as Map)['state'] as Map;
+      final messages = state['messages'] as List;
+      expect(messages.map((message) => message['role']), [
+        'user',
+        'model',
+        'tool',
+        'model',
+      ]);
+      expect(messages[2].toString(), contains('yes, delete it'));
+    } finally {
+      plugin.close();
+      await ai.shutdown();
+    }
   });
 
   test('guards a namespaced tool called by its short wire name', () async {
@@ -706,6 +885,83 @@ void main() {
       await ai.shutdown();
     }
   });
+
+  test(
+    'keeps the system prompt and latest user message when truncating',
+    () async {
+      final requests = <http.Request>[];
+      final plugin = TypeSafePlugin(
+        apiKey: 'test-key',
+        httpClient: MockClient((request) async {
+          requests.add(request);
+          return autoModeResponse(0.8);
+        }),
+      );
+      final guard = plugin.defineAutoMode(name: 'guard', tools: ['delete']);
+      final ai = Genkit(plugins: [plugin], isDevEnv: false);
+      final tool = ai.defineTool<Map<String, dynamic>, String>(
+        name: 'delete',
+        description: 'Deletes a report.',
+        fn: (input, ctx) async => .response('deleted'),
+      );
+      ai.defineModel(
+        name: 'model',
+        fn: (request, ctx) async {
+          return ModelResponse(
+            finishReason: FinishReason.stop,
+            message: Message(
+              role: Role.model,
+              content: request.messages.last.role == Role.tool
+                  ? [TextPart(text: 'done')]
+                  : [
+                      ToolRequestPart(
+                        toolRequest: ToolRequest(
+                          name: 'delete',
+                          input: <String, dynamic>{},
+                        ),
+                      ),
+                    ],
+            ),
+          );
+        },
+      );
+      try {
+        final response = await ai.generate(
+          messages: [
+            Message(
+              role: Role.system,
+              content: [TextPart(text: 'system policy')],
+            ),
+            Message(
+              role: Role.user,
+              content: [TextPart(text: 'user instruction')],
+            ),
+            for (var i = 1; i <= 40; i++)
+              Message(
+                role: Role.model,
+                content: [TextPart(text: 'progress $i')],
+              ),
+          ],
+          model: modelRef('model'),
+          tools: [tool],
+          use: [guard],
+        );
+        expect(response.finishReason, FinishReason.stop);
+        final state = (jsonDecode(requests.single.body) as Map)['state'] as Map;
+        final messages = state['messages'] as List;
+        expect(messages, hasLength(30));
+        expect(messages[0]['role'], 'system');
+        expect(messages[0].toString(), contains('system policy'));
+        expect(messages[1]['role'], 'user');
+        expect(messages[1].toString(), contains('user instruction'));
+        expect(messages[2].toString(), contains('progress 14'));
+        expect(messages.last['role'], 'model');
+      } finally {
+        plugin.close();
+        await ai.shutdown();
+      }
+    },
+  );
 }
 
 typedef _ScenarioResult = ({
@@ -724,6 +980,7 @@ Future<_ScenarioResult> _runScenario({
   http.Response Function(int call)? answer,
   RetryPolicy? retry,
   CancellationToken? cancel,
+  void Function()? onFirstModelCall,
 }) async {
   final requests = <http.Request>[];
   final client = MockClient((request) async {
@@ -762,6 +1019,7 @@ Future<_ScenarioResult> _runScenario({
     fn: (request, ctx) async {
       modelCalls++;
       if (modelCalls == 1) {
+        onFirstModelCall?.call();
         return ModelResponse(
           finishReason: FinishReason.stop,
           message: Message(

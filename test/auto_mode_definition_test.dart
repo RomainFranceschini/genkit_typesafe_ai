@@ -90,6 +90,29 @@ void main() {
     }
   });
 
+  test('rejects blank instructions without partial registration', () async {
+    for (final instructions in ['', '  ']) {
+      final plugin = TypeSafePlugin();
+      expect(
+        () => plugin.defineAutoMode(
+          name: 'guard',
+          tools: ['delete'],
+          instructions: instructions,
+        ),
+        throwsA(
+          isA<GenkitException>().having(
+            (error) => error.status,
+            'status',
+            StatusCodes.INVALID_ARGUMENT,
+          ),
+        ),
+      );
+      expect(plugin.middleware(), isEmpty);
+      expect(await plugin.list(), isEmpty);
+      plugin.close();
+    }
+  });
+
   test('rejects invalid names and non-JSON criteria', () async {
     for (final name in ['', '  ', 'bad/name']) {
       final plugin = TypeSafePlugin();

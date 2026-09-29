@@ -273,15 +273,18 @@ final class TypeSafePlugin extends GenkitPlugin {
       normalizedTools.add(normalized);
     }
 
-    final normalizedInstructions = snapshotJson(
-      instructions,
-      field: 'Auto Mode "$name" instructions',
-    ) as String;
+    if (instructions.trim().isEmpty) {
+      throw GenkitException(
+        'Auto Mode "$name" requires nonblank instructions.',
+        status: StatusCodes.INVALID_ARGUMENT,
+      );
+    }
+    final guardedTools = List<String>.unmodifiable(normalizedTools);
     final normalizedCriteria =
         snapshotJson(criteria.toJson(), field: 'Auto Mode "$name" criteria')!
             as Map<String, dynamic>;
     final question = Noul(
-      instructions: normalizedInstructions,
+      instructions: instructions,
       criteria: NoulCriteria(
         whenTrue: normalizedCriteria['true'],
         whenFalse: normalizedCriteria['false'],
@@ -297,13 +300,13 @@ final class TypeSafePlugin extends GenkitPlugin {
       typesafeMetadata: {
         'kind': 'auto-mode',
         'middleware': '${this.name}/$name',
-        'tools': List<String>.unmodifiable(normalizedTools),
+        'tools': guardedTools,
       },
     );
     final autoMode = TypeSafeAutoMode.internal(
       name: '${this.name}/$name',
       localName: name,
-      tools: normalizedTools,
+      tools: guardedTools,
       question: question,
       classifier: classifier,
     );

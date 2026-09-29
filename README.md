@@ -150,9 +150,13 @@ final response = await ai.generate(
 );
 ```
 
-Only listed tools are checked; other tools run normally. Before **each** guarded
-call, Auto Mode sends the proposed name, arguments, available description, and
-up to 30 recent messages to TypeSafe. Only explicit user messages count as
+Only listed tools are checked; other tools run normally. A listed tool is matched
+by its last path segment, the same way Genkit resolves tool requests, so
+`delete`, `files/delete`, and any other `…/delete` request are all guarded by
+either name. Before **each** guarded call, Auto Mode sends the proposed name,
+arguments, available description, and up to 30 messages to TypeSafe: the most
+recent ones, always including the first system message and the latest user
+message. Only explicit user messages count as
 authorization in its default risk instructions. A risk probability below `0.5`
 allows the call. At or above `0.5`, it skips the tool and returns a tool result
 explaining the refusal (with `typesafe.blocked` metadata), so the model can
