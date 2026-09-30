@@ -1,20 +1,17 @@
 # Genkit TypeSafe AI
 
-Typed TypeSafe AI classifier actions and model discovery for Genkit Dart. This
-package is a Genkit plugin, not a Genkit Model provider.
+Typed classifiers, model routing, and tool-risk checks for Genkit Dart.
 
 ## Installation
 
-Requires Dart 3.13.3 or later (before Dart 4).
-
 ```sh
 dart pub add genkit genkit_typesafe_ai
+export TYPESAFE_API_KEY="your-key"
 ```
 
-The TypeSafe SDK resolves `TYPESAFE_API_KEY` from the environment. You can also
-pass `apiKey` directly when constructing the plugin.
+Requires Dart `^3.13.3`. Alternatively, pass `apiKey` to `typeSafeAI()`.
 
-## Typed classifier quickstart
+## Classify
 
 ```dart
 import 'package:genkit/genkit.dart';
@@ -43,8 +40,10 @@ Future<void> main() async {
 }
 ```
 
-The package exports TypeSafe SDK question and answer types. A classifier may mix
-`Choice`, `Noul`, and `Score` questions in one request:
+Define classifiers before creating `Genkit`. Retrieve answers with the original
+question objects. TypeSafe SDK types are re-exported by this package.
+
+### Mix question types
 
 ```dart
 import 'package:genkit/genkit.dart' hide Score;
@@ -53,6 +52,7 @@ import 'package:genkit_typesafe_ai/genkit_typesafe_ai.dart';
 final sentiment = Choice({'negative': 'Unhappy', 'positive': 'Happy'});
 final needsFollowUp = Noul(instructions: 'Does this need a reply?');
 final priority = Score.levels(['Low priority', 'High priority']);
+final typeSafe = typeSafeAI();
 final classifier = typeSafe.defineClassifier(
   name: 'ticket-analysis',
   questions: {
@@ -61,16 +61,15 @@ final classifier = typeSafe.defineClassifier(
     'priority': priority,
   },
 );
+final response = await classifier('Happy with the fix, but please follow up.');
+print(response.get(sentiment).choice);
+print(response.get(needsFollowUp).noul);
+print(response.get(priority).score);
 ```
 
-Retrieve each typed answer with `response.get(question)`, such as
-`response.get(sentiment).choice`, `response.get(needsFollowUp).noul`, or
-`response.get(priority).score`.
+Hide Genkit's `Score` when importing both packages.
 
-## Model routing middleware
-
-Define a named router from any registered Genkit model references, then pass the
-router through `use`:
+## Route models
 
 ```dart
 final typeSafe = typeSafeAI();
@@ -79,17 +78,11 @@ final router = typeSafe.defineModelRouter(
   instructions: 'Choose the least costly capable model.',
   routes: {
     'fast': TypeSafeModelRoute(
-      model: modelRef(
-        'provider/fast',
-        config: {'temperature': 0.1},
-      ),
+      model: modelRef('provider/fast', config: {'temperature': 0.1}),
       criteria: 'Simple, well-scoped tasks.',
     ),
     'powerful': TypeSafeModelRoute(
-      model: modelRef(
-        'provider/powerful',
-        config: {'temperature': 0.7},
-      ),
+      model: modelRef('provider/powerful', config: {'temperature': 0.7}),
       criteria: 'Complex tasks requiring deeper reasoning.',
     ),
   },
@@ -102,15 +95,15 @@ final response = await ai.generate(
 );
 ```
 
-The router classifies the latest user message once and keeps the selected model
-and that model reference's config for every tool-loop turn. Low-confidence
-answers still select their route; v1 does not apply a confidence threshold or
-fallback. TypeSafe or routing failures produce Genkit failed responses and do
-not call the original model or another fallback model.
+- Replace `providerPlugin` and model names with your registered provider models.
+  This package does not supply generative models or embeddings.
+- Routes the latest user message once; keeps the selected model and its config
+  across tool-loop turns.
+- Selects even low-confidence routes. No confidence threshold or fallback;
+  routing failures return a failed generation without calling a model.
+- One distinct router per generation. Repeating the same reference has no effect.
 
-The complete typed decision, including confidence and probabilities, is copied
-into Genkit context for downstream middleware and tools. A tool can inspect it
-without depending on the package's internal context key:
+### Inspect the decision
 
 ```dart
 final inspectRoute = ai.defineTool<Map<String, dynamic>, String>(
@@ -123,15 +116,11 @@ final inspectRoute = ai.defineTool<Map<String, dynamic>, String>(
 );
 ```
 
-Router metadata and `TypeSafeRouteDecision.toJson()` include route and model
-names, but never include model configs, credentials, or headers. Only one
-distinct TypeSafe router may be used in a generation run; repeating the same
-router reference is idempotent.
+Downstream tools and middleware receive the typed decision in a copied context.
+It includes the route, model, confidence, and probabilities. Router metadata and
+`decision.toJson()` omit model configs, credentials, and headers.
 
-## Auto Mode tool-risk middleware
-
-Choose the tools to guard when defining Auto Mode, then pass the named
-middleware reference through `use`:
+## Guard tool calls with Auto Mode
 
 ```dart
 final typeSafe = typeSafeAI();
@@ -152,45 +141,37 @@ final response = await ai.generate(
 );
 ```
 
-Only listed tools are checked; other tools run normally. A listed tool is matched
-by its last path segment, the same way Genkit resolves tool requests, so
-`delete`, `files/delete`, and any other `…/delete` request are all guarded by
-either name. Before **each** guarded call, Auto Mode sends the proposed name,
-arguments, available description, and up to 30 messages to TypeSafe: the most
-recent ones, always including the first system message and the latest user
-message. Only explicit user messages count as
-authorization in its default risk instructions. A risk probability below `0.5`
-allows the call. At or above `0.5`, it skips the tool and returns a tool result
-explaining the refusal (with `typesafe.blocked` metadata), so the model can
-continue. A TypeSafe failure fails the generation and does not execute the
-guarded tool; Genkit reports tool-hook failures with an `INTERNAL` top-level
-status and retains the mapped TypeSafe error as the underlying cause. Auto Mode
-does not request human approval; use Genkit's `toolApproval` middleware for
-interrupt-and-approve flows.
+Use your registered `deleteFile`, `readFile`, and provider plugin in this example.
 
-The classification input includes conversation contents and tool arguments:
-they go to TypeSafe and can appear in Genkit classifier-action traces. Do not
-include secrets in them unless that data transfer and trace visibility are
-acceptable. Auto Mode guards tools in the Genkit generation loop, not direct
-tool action invocations. It can be combined with the model router. Repeating an
-Auto Mode reference evaluates a permitted call once per occurrence.
+| Risk probability | Result |
+| --- | --- |
+| Below `0.5` | Runs the tool. |
+| `0.5` or higher | Skips it; returns a refusal with `typesafe.blocked` metadata. The model continues. |
+| Classification fails | Fails the generation; does not run the guarded tool. |
 
-On Genkit 0.17, restarting a namespaced tool requires its **full registered
-name** in both the saved tool-request message and the `interruptRestart` tool
-request. A normal model call may store only its short wire name; callers must
-normalize that saved history themselves before restarting. Auto Mode does not
-rewrite it. Genkit 0.17 also drops tool-result metadata when rebuilding the
-resumed conversation: the refusal text and call reference survive, but
-`typesafe.blocked` does not. Inspect the classifier action trace for the
-decision on restarted calls. Genkit may change this behavior in later versions.
+- Checks **each** listed tool call; unlisted tools run normally.
+- Matches the last name segment: `delete` and `files/delete` guard the same tool.
+- Sends the proposed name, arguments, description, and up to 30 recent messages
+  to TypeSafe, retaining the first system and latest user message.
+- Default instructions accept authorization only from explicit user messages.
+- Guards generation-loop calls, not direct tool invocations. Can combine with
+  routing; repeated Auto Mode references recheck permitted calls.
 
-## Plugin options and models
+**Safety:** Conversation contents and tool arguments go to TypeSafe and may appear
+in Genkit traces. Avoid secrets. This probabilistic filter is not a security
+boundary or human approval flow; use Genkit's `toolApproval` for approval.
 
-`typeSafeAI` accepts `apiKey`, `baseUrl`, `defaultModel`, `logger`, `retry`,
-`timeout`, `defaultHeaders`, and an optional `httpClient`. The SDK also honors
-`TYPESAFE_API_KEY` when no key is passed. Set a fixed plugin model with
-`defaultModel`, or override the request for a classifier with its `model`,
-`timeout`, `retry`, and `headers` options:
+### Genkit 0.17 notes
+
+- Namespaced tool restarts require the **full registered name** in both saved
+  tool-request history and `interruptRestart`. Normalize short names yourself;
+  Auto Mode does not rewrite them.
+- Resumed conversations retain refusal text and call references, but lose
+  `typesafe.blocked` metadata. Check the classifier trace for restarted decisions.
+- Tool-hook failures have top-level `INTERNAL` status; the mapped TypeSafe error
+  remains in the underlying cause.
+
+## Configure and discover models
 
 ```dart
 final typeSafe = typeSafeAI(defaultModel: 'jev-latest');
@@ -199,19 +180,19 @@ final classifier = typeSafe.defineClassifier(
   model: 'jev-latest',
   questions: {'urgent': Noul(instructions: 'Is this urgent?')},
 );
-```
-
-Discover available models explicitly with:
-
-```dart
 final models = await typeSafe.listModels();
 ```
 
-## Errors and lifecycle
+| Scope | Options |
+| --- | --- |
+| Plugin | `name`, `apiKey`, `baseUrl`, `defaultModel`, `logger`, `retry`, `timeout`, `defaultHeaders`, `httpClient`, `dangerouslyAllowBrowser` |
+| Classifier | `model`, `timeout`, `retry`, `headers` |
+| Router / Auto Mode | `classifierModel`, `timeout`, `retry`, `headers` |
 
-Classifier and model-discovery failures are surfaced as `GenkitException`.
-Inspect `underlyingException` to handle a TypeSafe SDK `TypeSafeError` or
-`ApiError` when needed:
+`classifierModel` selects the TypeSafe model, not the downstream Genkit model.
+`listModels()` discovers TypeSafe models; it does not register Genkit models.
+
+## Handle errors and close clients
 
 ```dart
 try {
@@ -224,25 +205,24 @@ try {
 }
 ```
 
-Call `typeSafe.close()` when finished. The plugin closes clients it creates but
-does not close an injected `httpClient`; its owner remains responsible for that
-client. Also shut down the `Genkit` instance with `await ai.shutdown()`.
+- Classifier and discovery failures throw `GenkitException`; inspect
+  `underlyingException` for the original SDK error.
+- Call `typeSafe.close()` and `await ai.shutdown()` when finished.
+- The plugin closes its own HTTP client, not an injected `httpClient`.
 
 ## Browser use
 
-Browser use requires `dangerouslyAllowBrowser: true`. This explicitly permits a
-client-side API key and is unsafe for public or untrusted browser deployments;
-use a server-side proxy instead whenever possible.
+```dart
+final typeSafe = typeSafeAI(
+  apiKey: 'client-visible-key',
+  dangerouslyAllowBrowser: true,
+);
+```
 
-## Limitations
+**Exposes your API key to the client.** Avoid public or untrusted browser
+deployments; prefer a server-side proxy.
 
-This package does not provide a generative model, chat model, embeddings, or a
-model-provider implementation. Model routing requires separately registered
-Genkit models from the provider plugins selected by the application.
-
-## Runnable examples
-
-Set `TYPESAFE_API_KEY` in your environment, then run:
+## Run the examples
 
 ```sh
 dart run example/genkit_typesafe_ai_example.dart
@@ -250,11 +230,9 @@ dart run example/model_router_example.dart
 dart run example/auto_mode_example.dart
 ```
 
-The routing and Auto Mode examples call the real TypeSafe service but use local
-demo generation models, so no second provider key is needed. Replace those models
-with your provider plugin in production. The Auto Mode example proposes a
-forbidden deletion and prints the refusal and execution count; its tool never
-touches real files. Classification is probabilistic, not a security boundary.
+Requires `TYPESAFE_API_KEY`. Routing and Auto Mode use local demo generation
+models, so no other provider key is needed. Auto Mode demonstrates a refused
+deletion without touching real files.
 
 ## Development and release checks
 
@@ -267,15 +245,18 @@ dart compile js tool/web_compile_check.dart -o "${TMPDIR:-/tmp}/genkit_typesafe_
 dart pub publish --dry-run
 ```
 
-CI runs these checks on the minimum supported Dart SDK and the current stable
-SDK. Tests tagged `live` are excluded from CI and require `TYPESAFE_API_KEY`:
+CI checks minimum and stable Dart. Run live tests separately:
 
 ```sh
 dart test test/integration/live_test.dart
 ```
 
-Live tests cover classification, routing, and allowed/blocked Auto Mode calls.
-They make real API requests and may incur usage charges. Re-run them after SDK
-upgrades before releasing. To preview pub.dev scoring, run
-`dart pub global activate pana` followed by
-`dart pub global run pana .`.
+Live tests require `TYPESAFE_API_KEY` and may incur API charges. They cover
+classification, routing, and allowed/blocked tools; rerun after SDK upgrades.
+
+Preview pub.dev scoring:
+
+```sh
+dart pub global activate pana
+dart pub global run pana .
+```
