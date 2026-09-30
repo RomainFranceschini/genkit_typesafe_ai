@@ -9,12 +9,25 @@ import 'classifier.dart';
 import 'errors.dart';
 import 'model_router.dart';
 
+/// The default namespace for TypeSafe classifier actions and middleware.
 const defaultTypeSafeNamespace = 'typesafe';
+
+/// The callable factory for a TypeSafe plugin.
+///
+/// Define classifiers and middleware before registering the plugin with Genkit,
+/// and call [TypeSafePlugin.close] when finished.
 const typeSafeAI = TypeSafePluginHandle();
 
+/// A callable factory for configuring a TypeSafe plugin.
 final class TypeSafePluginHandle {
+  /// Creates a reusable plugin factory.
   const TypeSafePluginHandle();
 
+  /// Creates a plugin with lazily initialized TypeSafe client options.
+  ///
+  /// When [apiKey] is omitted, the SDK reads `TYPESAFE_API_KEY`. Browser use
+  /// requires [dangerouslyAllowBrowser] and exposes the key to the client.
+  /// The owner of an injected [httpClient] remains responsible for closing it.
   TypeSafePlugin call({
     String name = defaultTypeSafeNamespace,
     String? apiKey,
@@ -40,7 +53,22 @@ final class TypeSafePluginHandle {
   );
 }
 
+/// A Genkit plugin providing TypeSafe classifier actions and middleware.
+///
+/// Definitions must be added before Genkit initializes or lists the plugin.
+/// The TypeSafe client is created on first use, not during registration.
+/// Call [close] when finished, separately from shutting down Genkit.
 final class TypeSafePlugin extends GenkitPlugin {
+  /// Creates a plugin with a distinct action and middleware namespace.
+  ///
+  /// The [name] must be nonblank and must not contain `/`. When [apiKey] is
+  /// omitted, the SDK reads `TYPESAFE_API_KEY`. Client-wide options can be
+  /// overridden by individual classifier or middleware definitions.
+  /// An injected [httpClient] is not closed by this plugin.
+  ///
+  /// Browser use requires [dangerouslyAllowBrowser] and exposes credentials;
+  /// prefer a server-side proxy for untrusted clients. The [clientFactory]
+  /// parameter is a test seam, not an application configuration option.
   factory TypeSafePlugin({
     String name = defaultTypeSafeNamespace,
     String? apiKey,
@@ -91,16 +119,35 @@ final class TypeSafePlugin extends GenkitPlugin {
 
   @override
   final String name;
+
+  /// The explicit API key, or `null` to use the SDK's environment lookup.
   final String? apiKey;
+
+  /// The API base URL override, or `null` to use the SDK default.
   final String? baseUrl;
+
+  /// The default classifier model, or `null` to use the SDK default.
   final String? defaultModel;
+
+  /// The logger override, or `null` to use the SDK default.
   final Logger? logger;
+
+  /// The client-wide retry policy override.
   final RetryPolicy? retry;
+
+  /// The client-wide request timeout override.
   final Duration? timeout;
+
+  /// The immutable snapshot of client-wide request headers.
   final Map<String, String> defaultHeaders;
+
+  /// The caller-owned HTTP client, or `null` for an SDK-owned client.
   final http.Client? httpClient;
+
+  /// Whether client-side API key use is explicitly permitted in browsers.
   final bool dangerouslyAllowBrowser;
 
+  /// The test-only factory used instead of creating an SDK client.
   @visibleForTesting
   final TypeSafeClient Function()? clientFactory;
 
@@ -111,6 +158,12 @@ final class TypeSafePlugin extends GenkitPlugin {
   var _initialized = false;
   var _closed = false;
 
+  /// Defines a named classifier with fixed questions and request options.
+  ///
+  /// Call the returned classifier with new state for each request and retrieve
+  /// typed answers using the original question objects. The [name] must be
+  /// unique, nonblank, and contain no `/`; [questions] must not be empty.
+  /// Definitions cannot be added after plugin initialization or closure.
   TypeSafeClassifier defineClassifier({
     required String name,
     required Map<String, Question<Answer>> questions,
@@ -140,6 +193,18 @@ final class TypeSafePlugin extends GenkitPlugin {
     return classifier;
   }
 
+  /// Defines middleware that selects a registered Genkit model through TypeSafe.
+  ///
+  /// Pass the returned router to Genkit's `use` generation option. It classifies
+  /// the latest user message once per generation run and retains the selected
+  /// model and its reference configuration across tool-loop turns. Only one
+  /// distinct TypeSafe router is permitted in a generation run.
+  ///
+  /// The [instructions], route criteria, and model configs must be
+  /// JSON-encodable and are snapshotted at definition time. [routes] must be
+  /// nonempty. [classifierModel] selects the TypeSafe classifier, not the
+  /// downstream Genkit model. Classification errors fail the generation;
+  /// low-confidence answers still select a route, without a fallback.
   TypeSafeModelRouter defineModelRouter({
     required String name,
     required Object instructions,
@@ -242,6 +307,21 @@ final class TypeSafePlugin extends GenkitPlugin {
     return router;
   }
 
+  /// Defines middleware that checks risk before each listed tool call.
+  ///
+  /// Pass the returned reference to Genkit's `use` generation option. [tools]
+  /// are matched by their last path segment, as Genkit resolves tool requests.
+  /// Unlisted tools and direct tool action invocations are not guarded.
+  ///
+  /// A risk probability below `0.5` permits execution; otherwise a refusal
+  /// result replaces the call and the model can continue. Classification errors
+  /// fail the generation without executing the tool. This is probabilistic
+  /// filtering, not a security boundary or a human approval workflow.
+  ///
+  /// Tool arguments and up to 30 conversation messages are sent to TypeSafe
+  /// and may appear in classifier traces. Only explicit user messages authorize
+  /// execution under the default [instructions]. [classifierModel] selects the
+  /// TypeSafe classifier model. Define this middleware before initialization.
   TypeSafeAutoMode defineAutoMode({
     required String name,
     required List<String> tools,
@@ -359,6 +439,10 @@ final class TypeSafePlugin extends GenkitPlugin {
     ];
   }
 
+  /// Fetches available TypeSafe classifier models using the shared lazy client.
+  ///
+  /// SDK failures are mapped to [GenkitException] with the original error
+  /// retained as the underlying exception. This does not register Genkit models.
   Future<List<ModelCard>> listModels() async {
     _ensureOpen();
     try {
@@ -394,6 +478,10 @@ final class TypeSafePlugin extends GenkitPlugin {
     return _classifiers[name]?.action;
   }
 
+  /// Closes the SDK client and prevents further definitions or requests.
+  ///
+  /// Repeated calls do nothing. An injected [httpClient] remains caller-owned;
+  /// Genkit must be shut down separately.
   void close() {
     if (_closed) return;
     _closed = true;

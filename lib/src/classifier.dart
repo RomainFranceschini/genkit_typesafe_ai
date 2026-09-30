@@ -6,6 +6,7 @@ import 'package:typesafe_ai_sdk/typesafe_ai_sdk.dart';
 import 'errors.dart';
 import 'serialization.dart';
 
+/// The Genkit action type used to register TypeSafe classifiers.
 const typeSafeClassifierActionType = ActionType('typesafe-classifier');
 
 typedef TypeSafeClassifyFn = Future<SystemOneResponse> Function({
@@ -49,6 +50,10 @@ final _resultSchema = SchemanticType.from<_ClassifierActionResult>(
   serialize: (result) => result.toJson(),
 );
 
+/// A reusable Genkit action with fixed TypeSafe questions and typed answers.
+///
+/// Create instances through the plugin's `defineClassifier` method and retrieve
+/// answers with `response.get(question)` using the original question object.
 final class TypeSafeClassifier {
   @internal
   TypeSafeClassifier.internal({
@@ -107,18 +112,36 @@ final class TypeSafeClassifier {
     );
   }
 
+  /// The local definition name, without the plugin namespace.
   final String name;
+
+  /// The fully qualified Genkit action name.
   late final String actionName;
+
+  /// The immutable mapping of wire names to typed question handles.
   final Map<String, Question<Answer>> questions;
+
+  /// The classifier model override, or `null` to use the client default.
   final String? model;
+
+  /// The request timeout override.
   final Duration? timeout;
+
+  /// The request retry policy override.
   final RetryPolicy? retry;
+
+  /// The immutable request-header overrides, if supplied.
   final Map<String, String>? headers;
   late final Action<Object?, _ClassifierActionResult, void, void> _action;
 
   @internal
   Action get action => _action;
 
+  /// Classifies JSON-encodable state and returns typed TypeSafe answers.
+  ///
+  /// The request runs as a Genkit action and may expose [state] in traces.
+  /// SDK failures are mapped to [GenkitException]. A supplied [cancel] token
+  /// is checked before dispatch; it does not abort an in-flight SDK request.
   Future<SystemOneResponse> call(
     Object? state, {
     CancellationToken? cancel,

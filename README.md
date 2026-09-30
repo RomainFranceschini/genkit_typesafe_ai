@@ -5,6 +5,8 @@ package is a Genkit plugin, not a Genkit Model provider.
 
 ## Installation
 
+Requires Dart 3.13.3 or later (before Dart 4).
+
 ```sh
 dart pub add genkit genkit_typesafe_ai
 ```
@@ -237,3 +239,43 @@ use a server-side proxy instead whenever possible.
 This package does not provide a generative model, chat model, embeddings, or a
 model-provider implementation. Model routing requires separately registered
 Genkit models from the provider plugins selected by the application.
+
+## Runnable examples
+
+Set `TYPESAFE_API_KEY` in your environment, then run:
+
+```sh
+dart run example/genkit_typesafe_ai_example.dart
+dart run example/model_router_example.dart
+dart run example/auto_mode_example.dart
+```
+
+The routing and Auto Mode examples call the real TypeSafe service but use local
+demo generation models, so no second provider key is needed. Replace those models
+with your provider plugin in production. The Auto Mode example proposes a
+forbidden deletion and prints the refusal and execution count; its tool never
+touches real files. Classification is probabilistic, not a security boundary.
+
+## Development and release checks
+
+```sh
+dart pub get
+dart format --output=none --set-exit-if-changed lib test example tool
+dart analyze --fatal-infos
+dart test --exclude-tags live
+dart compile js tool/web_compile_check.dart -o "${TMPDIR:-/tmp}/genkit_typesafe_ai_web.js"
+dart pub publish --dry-run
+```
+
+CI runs these checks on the minimum supported Dart SDK and the current stable
+SDK. Tests tagged `live` are excluded from CI and require `TYPESAFE_API_KEY`:
+
+```sh
+dart test test/integration/live_test.dart
+```
+
+Live tests cover classification, routing, and allowed/blocked Auto Mode calls.
+They make real API requests and may incur usage charges. Re-run them after SDK
+upgrades before releasing. To preview pub.dev scoring, run
+`dart pub global activate pana` followed by
+`dart pub global run pana .`.

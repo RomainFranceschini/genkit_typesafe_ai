@@ -20,6 +20,7 @@ void main() {
       ),
     },
   );
+  plugin.defineAutoMode(name: 'web-guard', tools: ['deleteDemoReport']);
   Genkit(plugins: [plugin]);
   plugin.close();
 }

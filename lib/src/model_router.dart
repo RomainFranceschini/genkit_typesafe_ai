@@ -12,14 +12,21 @@ const _routeDecisionsContextKey = 'genkit_typesafe_ai/model-router-decisions';
 final _modelRouterRunStateZoneKey = Object();
 var _latestModelRouterMiddlewareCreationId = 0;
 
+/// A candidate Genkit model and the criteria for selecting it.
 final class TypeSafeModelRoute {
+  /// Creates a route whose model config and criteria are snapshotted on definition.
   const TypeSafeModelRoute({required this.model, required this.criteria});
 
+  /// The registered Genkit model reference, including route-owned configuration.
   final ModelRef<dynamic> model;
+
+  /// The JSON-encodable classification criteria for this route.
   final Object? criteria;
 }
 
+/// A typed routing decision shared with downstream middleware and tools.
 final class TypeSafeRouteDecision {
+  /// Creates a decision describing the selected route and classifier answer.
   const TypeSafeRouteDecision({
     required this.routerName,
     required this.route,
@@ -27,14 +34,25 @@ final class TypeSafeRouteDecision {
     required this.answer,
   });
 
+  /// The fully qualified router name.
   final String routerName;
+
+  /// The selected route label.
   final String route;
+
+  /// The selected Genkit model name.
   final String modelName;
+
+  /// The complete typed TypeSafe choice answer.
   final ChoiceAnswer<String> answer;
 
+  /// The classifier confidence in the selected route.
   double get confidence => answer.confidence;
+
+  /// The classifier probabilities for all route labels.
   Map<String, double> get probabilities => answer.probabilities;
 
+  /// Serializes the decision without model configuration, headers, or credentials.
   Map<String, Object?> toJson() => {
     'router': routerName,
     'route': route,
@@ -95,6 +113,11 @@ Object? _freezeJson(Object? value) => switch (value) {
   _ => value,
 };
 
+/// Middleware that selects a model once and retains it across tool-loop turns.
+///
+/// Create instances through the plugin's `defineModelRouter` method and pass
+/// them to Genkit's `use` generation option. The selected model must be
+/// registered separately; this middleware is not a model provider.
 final class TypeSafeModelRouter implements GenerateMiddlewareRef<Object?> {
   @internal
   TypeSafeModelRouter.internal({
@@ -106,6 +129,7 @@ final class TypeSafeModelRouter implements GenerateMiddlewareRef<Object?> {
     required this.classifier,
   });
 
+  /// The local definition name, without the plugin namespace.
   final String localName;
 
   @override
@@ -114,6 +138,7 @@ final class TypeSafeModelRouter implements GenerateMiddlewareRef<Object?> {
   @override
   Object? get config => null;
 
+  /// The immutable route definitions, with snapshotted configs and criteria.
   final Map<String, TypeSafeModelRoute> routes;
 
   @internal
@@ -125,6 +150,9 @@ final class TypeSafeModelRouter implements GenerateMiddlewareRef<Object?> {
   @internal
   final TypeSafeClassifier classifier;
 
+  /// Retrieves this router's decision from a downstream Genkit action context.
+  ///
+  /// Returns `null` when [context] does not contain a decision for this router.
   TypeSafeRouteDecision? decisionFromContext(Map<String, dynamic>? context) {
     final decisions = context?[_routeDecisionsContextKey];
     if (decisions is! Map) return null;

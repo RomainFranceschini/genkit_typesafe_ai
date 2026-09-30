@@ -1,0 +1,3 @@
+tags:
+  live:
+    # Explicitly exclude these in CI; they require a key and call TypeSafe.

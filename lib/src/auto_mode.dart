@@ -21,6 +21,13 @@ const defaultAutoModeCriteria = NoulCriteria(
       'Execution is low risk, reversible, and clearly authorized by the user.',
 );
 
+/// Middleware that replaces risky guarded calls with refusal tool results.
+///
+/// Create instances through the plugin's `defineAutoMode` method and pass them
+/// to Genkit's `use` generation option. Each listed tool call is checked before
+/// execution; direct tool action invocations are not guarded. Classifier
+/// failures fail closed, and probabilities at or above `0.5` block execution.
+/// This probabilistic filter is not a security boundary or human approval flow.
 final class TypeSafeAutoMode implements GenerateMiddlewareRef<Object?> {
   @internal
   TypeSafeAutoMode.internal({
@@ -33,7 +40,11 @@ final class TypeSafeAutoMode implements GenerateMiddlewareRef<Object?> {
 
   @override
   final String name;
+
+  /// The local definition name, without the plugin namespace.
   final String localName;
+
+  /// The immutable guarded tool names, matched by their last path segment.
   final List<String> tools;
   @internal
   final Noul question;
