@@ -11,6 +11,9 @@ topics:
   - genkit
   - ai
   - classification
+  - jev
+  - typesafe
+  - systemone
 
 dependencies:
   genkit: ^0.17.0
